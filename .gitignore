@@ -23,6 +23,7 @@ outputs/
 *.pos
 *.rpt
 *.net
+*.lck
 
 # SPICE/simulation output
 *.raw
