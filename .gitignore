@@ -38,3 +38,4 @@ pcb/.history
 # Firmware build output
 build/
 cmake-build-*/
+.ci-dependencies/

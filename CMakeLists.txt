@@ -1,25 +1,48 @@
 cmake_minimum_required(VERSION 3.13)
 
-if(NOT PICO_SDK_PATH AND DEFINED ENV{PICO_SDK_PATH})
-    set(PICO_SDK_PATH "$ENV{PICO_SDK_PATH}")
-endif()
+# Keep the SDK and extras versions reproducible across local and CI builds.
+set(P2000M_PICO_SDK_VERSION "2.3.0")
 
-if(NOT PICO_EXTRAS_PATH AND DEFINED ENV{PICO_EXTRAS_PATH})
-    set(PICO_EXTRAS_PATH "$ENV{PICO_EXTRAS_PATH}")
-endif()
+# This firmware uses RP2350-specific APIs and is only supported on Pico 2. Set
+# both cache values explicitly so a plain `cmake ..` cannot silently configure
+# for the SDK's legacy Pico/RP2040 default, even in a previously failed build.
+set(PICO_BOARD "pico2" CACHE STRING "Target Raspberry Pi Pico board" FORCE)
+set(PICO_PLATFORM "rp2350-arm-s" CACHE STRING
+    "Target Raspberry Pi silicon platform" FORCE)
 
-if(NOT EXISTS "${PICO_SDK_PATH}/external/pico_sdk_import.cmake")
+# CMake can fetch source dependencies, but it still needs an executable Arm
+# cross-compiler. Check this before downloading anything and provide a focused
+# error instead of letting compiler discovery fail from inside pico-extras.
+if(NOT PICO_TOOLCHAIN_PATH AND DEFINED ENV{PICO_TOOLCHAIN_PATH})
+    set(PICO_TOOLCHAIN_PATH "$ENV{PICO_TOOLCHAIN_PATH}")
+endif()
+find_program(P2000M_ARM_GCC
+    NAMES arm-none-eabi-gcc
+    HINTS "${PICO_TOOLCHAIN_PATH}" "${PICO_TOOLCHAIN_PATH}/bin"
+)
+if(NOT P2000M_ARM_GCC)
     message(FATAL_ERROR
-        "Pico SDK not found. Set PICO_SDK_PATH to a Pico SDK 2.x checkout.")
+        "Arm GNU compiler 'arm-none-eabi-gcc' was not found. Install the "
+        "Arm GNU embedded toolchain or set PICO_TOOLCHAIN_PATH to its root.")
 endif()
 
-if(NOT EXISTS "${PICO_EXTRAS_PATH}/external/pico_extras_import.cmake")
-    message(FATAL_ERROR
-        "pico-extras not found. Set PICO_EXTRAS_PATH to a pico-extras checkout.")
+# Explicit paths still take precedence. Without them, the bundled import
+# helpers fetch both dependencies into the selected CMake build directory.
+if(NOT PICO_SDK_PATH)
+    set(PICO_SDK_FETCH_FROM_GIT ON CACHE BOOL
+        "Automatically download the Raspberry Pi Pico SDK")
+    set(PICO_SDK_FETCH_FROM_GIT_TAG "${P2000M_PICO_SDK_VERSION}"
+        CACHE STRING "Pico SDK version used by this firmware")
 endif()
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/pico_sdk_import.cmake")
 
-include("${PICO_SDK_PATH}/external/pico_sdk_import.cmake")
-include("${PICO_EXTRAS_PATH}/external/pico_extras_import.cmake")
+if(NOT PICO_EXTRAS_PATH)
+    set(PICO_EXTRAS_FETCH_FROM_GIT ON CACHE BOOL
+        "Automatically download pico-extras")
+    set(PICO_EXTRAS_FETCH_FROM_GIT_TAG "sdk-${P2000M_PICO_SDK_VERSION}"
+        CACHE STRING "pico-extras version used by this firmware")
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/pico_extras_import.cmake")
 
 project(p2000m_vid2vga_firmware VERSION 0.1.0 LANGUAGES C CXX ASM)
 

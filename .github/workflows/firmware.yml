@@ -1,0 +1,150 @@
+name: Firmware
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PICO_SDK_VERSION: "2.3.0"
+  PICO_SDK_PATH: ${{ github.workspace }}/.ci-dependencies/pico-sdk
+  PICO_EXTRAS_PATH: ${{ github.workspace }}/.ci-dependencies/pico-extras
+  PICOTOOL_FETCH_FROM_GIT_PATH: ${{ github.workspace }}/.ci-dependencies/picotool
+  PICO_CACHE_REVISION: "2"
+
+jobs:
+  build:
+    name: Build Pico 2 firmware
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Restore Pico SDK and pico-extras
+        id: pico-cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ env.PICO_SDK_PATH }}
+            ${{ env.PICO_EXTRAS_PATH }}
+            ${{ env.PICOTOOL_FETCH_FROM_GIT_PATH }}
+          key: pico-${{ runner.os }}-${{ runner.arch }}-${{ env.PICO_SDK_VERSION }}-${{ env.PICO_CACHE_REVISION }}
+
+      - name: Download Pico dependencies
+        if: steps.pico-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p "${{ github.workspace }}/.ci-dependencies"
+          git clone --branch "$PICO_SDK_VERSION" --depth 1 \
+            --recurse-submodules --shallow-submodules \
+            https://github.com/raspberrypi/pico-sdk.git "$PICO_SDK_PATH"
+          git clone --branch "sdk-$PICO_SDK_VERSION" --depth 1 \
+            --recurse-submodules --shallow-submodules \
+            https://github.com/raspberrypi/pico-extras.git "$PICO_EXTRAS_PATH"
+
+      - name: Install Arm compiler
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi \
+            libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib \
+            ninja-build
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_BOARD=pico2
+
+      - name: Validate release tag and changelog
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          project_version="$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' build/CMakeCache.txt)"
+          if [[ "$RELEASE_TAG" != "v$project_version" ]]; then
+            echo "Release tag $RELEASE_TAG does not match firmware v$project_version." >&2
+            exit 1
+          fi
+          if ! grep -Fq "## [$project_version]" CHANGELOG.md; then
+            echo "CHANGELOG.md has no section for $project_version." >&2
+            exit 1
+          fi
+
+      - name: Compile
+        shell: bash
+        run: cmake --build build --parallel
+
+      - name: Package tagged build
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          project_version="${RELEASE_TAG#v}"
+          mkdir -p dist
+          install -m 0644 build/src/p2000m-vid2vga-firmware.uf2 \
+            "dist/p2000m-vid2vga-firmware-$RELEASE_TAG.uf2"
+          awk -v heading="## [$project_version]" '
+            index($0, heading) == 1 { emit = 1 }
+            emit && /^## \[/ && index($0, heading) != 1 { exit }
+            emit { print }
+          ' CHANGELOG.md > dist/release-notes.md
+          test -s "dist/p2000m-vid2vga-firmware-$RELEASE_TAG.uf2"
+          test -s dist/release-notes.md
+
+      - name: Upload tagged build
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-${{ github.ref_name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub release
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download tagged build
+        uses: actions/download-artifact@v7
+        with:
+          name: firmware-${{ github.ref_name }}
+          path: dist
+
+      - name: Create release and attach UF2
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          asset="dist/p2000m-vid2vga-firmware-$RELEASE_TAG.uf2"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$asset" \
+              --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" "$asset" \
+              --verify-tag \
+              --title "P2000M VID2VGA firmware $RELEASE_TAG" \
+              --notes-file dist/release-notes.md \
+              --repo "$GITHUB_REPOSITORY"
+          fi

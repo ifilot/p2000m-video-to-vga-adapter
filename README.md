@@ -1,5 +1,7 @@
 # P2000M VID2VGA adapter
 
+[![Firmware](https://github.com/ifilot/p2000m-video-to-vga-adapter/actions/workflows/firmware.yml/badge.svg)](https://github.com/ifilot/p2000m-video-to-vga-adapter/actions/workflows/firmware.yml)
+
 This repository contains the adapter PCB and Raspberry Pi Pico 2 firmware for
 converting the Philips P2000M raw monochrome video output to VGA.
 
@@ -16,17 +18,33 @@ without introducing gray interpolation pixels.
 
 ## Building
 
-The build requires Raspberry Pi Pico SDK 2.x, `pico-extras`, CMake, Ninja, and
-an Arm GNU embedded toolchain. Set `PICO_SDK_PATH` and `PICO_EXTRAS_PATH` to
-their respective checkouts, then configure for Pico 2:
+The build requires Git, CMake, Ninja, and an Arm GNU embedded toolchain. The
+first configuration automatically downloads the pinned Pico SDK 2.3.0 and
+matching `pico-extras` release into the build directory; later configurations
+reuse those checkouts.
+
+On Debian or Ubuntu, install the host tools and cross-compiler with:
+
+```sh
+sudo apt update
+sudo apt install git cmake ninja-build build-essential \
+  gcc-arm-none-eabi libnewlib-arm-none-eabi \
+  libstdc++-arm-none-eabi-newlib
+```
 
 ```sh
 cmake -S . -B build -G Ninja \
-  -DPICO_BOARD=pico2 \
-  -DPICO_SDK_PATH=/path/to/pico-sdk \
-  -DPICO_EXTRAS_PATH=/path/to/pico-extras
+  -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
+
+Pico 2 and its `rp2350-arm-s` platform are project defaults, so
+`-DPICO_BOARD=pico2` is no longer necessary.
+
+For an offline or custom SDK installation, explicitly pass
+`-DPICO_SDK_PATH=/path/to/pico-sdk` and
+`-DPICO_EXTRAS_PATH=/path/to/pico-extras`; these overrides take precedence over
+automatic downloading.
 
 Flash the single generated image:
 
