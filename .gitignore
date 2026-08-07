@@ -34,3 +34,8 @@ outputs/
 Thumbs.db
 desktop.ini
 pcb/.history
+
+# Firmware build output
+build/
+cmake-build-*/
+.ci-dependencies/
