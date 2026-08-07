@@ -1,35 +1,58 @@
-; Line-locked oversampling of the P2000M's conditioned monochrome VIDEO.
+; @file p2000m_capture.pio
+; @brief Line-locked oversampling of conditioned Philips P2000M video.
 ;
-; IN base points at VIDEO_IN. HSYNC_IN and VSYNC_IN are the following two pins.
-; The state machine runs at a uniform 63 MHz (126 MHz system clock / 2).
-; Each visible scanline starts from its own HSYNC edge. A block contains two
-; groups of fourteen consecutive VIDEO samples; the loop branch leaves one
-; unsampled PIO cycle after each group. Autopush therefore emits 28 useful bits
-; in every word, with bits 31:28 unused. 228 groups produce 114 words spanning
-; 54.286 us, including timing margin on both sides of the 640-dot active area.
+; Pin contract (all inputs are conditioned and active-low):
+;   IN base + 0  VIDEO_IN  monochrome pixel level
+;   IN base + 1  HSYNC_IN  horizontal synchronization
+;   IN base + 2  VSYNC_IN  vertical synchronization
+;
+; Clock and packing contract:
+;   - State-machine clock: 63 MHz (126 MHz system clock divided by two).
+;   - Autopush threshold: 28 bits, shift-left/MSB-first.
+;   - Every sample group executes 14 IN instructions and one JMP instruction.
+;   - Two groups therefore produce one word containing 28 useful samples over
+;     30 clock ticks. Bits 31:28 in the DMA word are padding.
+;   - 228 groups produce 114 words and cover 3420 ticks / 54.286 microseconds.
+;
+; FIFO command contract:
+;   1. One word containing 287, the decrementing count for 288 visible lines.
+;   2. For each visible line, one word containing 227, the decrementing count
+;      for 228 sample groups.
+;
+; Frame geometry:
+;   VSYNC identifies source line 0. The program skips 24 complete scanlines
+;   (character row 25 and character row 0), then captures 288 lines covering
+;   the visible 80 x 24 character area. Every captured line is independently
+;   anchored to its HSYNC edge, preventing phase error from accumulating.
 
 .program p2000m_capture
 
 .wrap_target
+    ; Synchronize to the leading edge of a new active-low vertical sync pulse.
     wait 1 pin 2                   ; VSYNC idle
     wait 0 pin 2                   ; VSYNC asserted: frame line 0
-    pull block
-    mov y, osr                     ; 287: capture 288 visible lines
+    pull block                     ; Receive visible-line loop count from DMA
+    mov y, osr                     ; y = 287: capture 288 visible lines
 
+    ; Advance from the VSYNC reference to the first visible source scanline.
     set x, 23                      ; Skip row 25 and row 0: 24 scanlines
 skip_blank_lines:
     wait 1 pin 1                   ; HSYNC idle
     wait 0 pin 1                   ; HSYNC asserted / next line edge
     jmp x-- skip_blank_lines
 
+    ; Delay from the HSYNC edge to just before the 640-dot active-video window.
+    ; The loop is 32 iterations x 12 ticks = 384 ticks; NOP adds 21 ticks.
 line_start:
     set x, 31
 raw_start_delay:
     jmp x-- raw_start_delay [11]   ; 384 PIO cycles
     nop [20]                       ; Start roughly two dots before active VIDEO
 
-    pull block
-    mov x, osr                     ; 227: capture 228 fourteen-sample groups
+    ; Oversample the line. The trailing JMP is the one known unsampled tick in
+    ; each group; the C resampler explicitly models both gaps in every word.
+    pull block                     ; Receive this line's group count from DMA
+    mov x, osr                     ; x = 227: capture 228 sample groups
 sample_group:
     in pins, 1
     in pins, 1
@@ -45,12 +68,13 @@ sample_group:
     in pins, 1
     in pins, 1
     in pins, 1
-    jmp x-- sample_group           ; One unsampled cycle per fourteen samples
+    jmp x-- sample_group           ; Fifteenth tick: no VIDEO sample captured
 
+    ; Finish after the 288th line; otherwise synchronize the next line anew.
     jmp y-- next_line
 .wrap
 
 next_line:
-    wait 1 pin 1
-    wait 0 pin 1
+    wait 1 pin 1                   ; Wait for current HSYNC pulse to end
+    wait 0 pin 1                   ; Anchor to the next HSYNC leading edge
     jmp line_start

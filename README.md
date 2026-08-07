@@ -1,20 +1,24 @@
-# P2000M video to VGA adapter
+# P2000M VID2VGA adapter
 
 This repository contains the adapter PCB and Raspberry Pi Pico 2 firmware for
 converting the Philips P2000M raw monochrome video output to VGA.
 
-The firmware provides two separate hardware diagnostics plus a live bridge.
-The VGA diagnostic generates a 640 x 480, 60 Hz test image containing
-full-intensity color bars, separate 16-level red/green/blue ramps, a
-checkerboard, and a pink geometry border. The capture diagnostic acquires the
-P2000M input into memory and exposes timing, preview, and raw-frame data over
-USB. The live bridge combines both paths into a tear-free VGA image.
+Firmware version **v0.1.0** captures the conditioned P2000M signals on GPIO16-18,
+recovers the source dot grid in software, and presents a tear-free 640 x 288
+source image in a 640 x 480, 60 Hz VGA raster. The asynchronous 50.095 Hz
+source is repeated as needed at VGA frame boundaries.
 
-## Building the diagnostic firmware
+By default, the 288 source lines are displayed one-to-one between 96-line top
+and bottom margins. An optional fit mode expands them to all 480 VGA lines using
+symmetric nearest-neighbour 5:3 scaling. Each three-line source group becomes
+five output lines in a 2,1,2 repetition pattern, preserving hard text edges
+without introducing gray interpolation pixels.
 
-The build requires Raspberry Pi Pico SDK 2.x, `pico-extras`, CMake, and an Arm
-GNU embedded toolchain. Set `PICO_SDK_PATH` and `PICO_EXTRAS_PATH` to their
-respective checkouts, then configure specifically for Pico 2:
+## Building
+
+The build requires Raspberry Pi Pico SDK 2.x, `pico-extras`, CMake, Ninja, and
+an Arm GNU embedded toolchain. Set `PICO_SDK_PATH` and `PICO_EXTRAS_PATH` to
+their respective checkouts, then configure for Pico 2:
 
 ```sh
 cmake -S . -B build -G Ninja \
@@ -24,64 +28,75 @@ cmake -S . -B build -G Ninja \
 cmake --build build
 ```
 
-Flash `build/src/p2000m_vga_diagnostic.uf2` to the Pico 2. With the adapter
-connected to a VGA display, the test image should remain stable and fill a
-640 x 480 raster. The three ramps exercise every bit of each 4-bit resistor
-DAC; the checkerboard exposes pixel-clock or scanline instability. The pink
-border sits inside a four-pixel black blanking guard and should be visible on
-all four sides after the monitor's auto-adjustment.
+Flash the single generated image:
 
-## P2000M capture diagnostic
+```text
+build/src/p2000m-vid2vga-firmware.uf2
+```
 
-`build/src/p2000m_capture_diagnostic.uf2` captures the conditioned P2000M input
-on GPIO16-18 without producing VGA. Connect to the Pico 2 USB CDC serial port
-with a terminal. The firmware reports capture statistics every two seconds and
-accepts these commands:
+## Capture and resampling
 
-- `s`: print the latest frame period and capture counters.
-- `p`: render an 80 x 36 text preview of the most recent frame.
-- `d`: dump the packed oversampled 288-line capture as hexadecimal.
-- `j`: run phase tuning immediately and print all candidate scores.
-- `+`, `-`, `0`: adjust or clear the manual resampler trim.
-- `h` or `?`: print command help.
+The PCB's Schmitt trigger inverts the source, so a cleared captured bit means
+foreground and a set bit means background. PIO1 samples VIDEO uniformly at
+63 MHz and anchors each line independently to HSYNC. Each packed word contains
+28 useful samples and represents 30 PIO ticks; the software model explicitly
+accounts for the two loop-branch gaps.
 
-The hex dump is ordered left-to-right, top-to-bottom, most-significant bit
-first. Because the PCB's Schmitt trigger inverts the P2000M video input, a zero
-bit represents a white source sample and a one bit represents black. Each
-visible scanline is anchored independently to HSYNC and oversampled using a
-uniform 63 MHz PIO clock. A line contains 114 words; every word holds 28 useful
-samples in bits 27 through 0 and four padding bits. Two known PIO branch gaps
-occur per word and are included in the resampling model.
+Three raw buffers decouple continuous DMA capture from software. The resampler
+derives the horizontal dot period from the measured frame period, searches five
+candidate phases, and decodes each output pixel from an early/centre/late
+three-sample window. A double-buffered map allows automatic tuning updates
+without mixing mappings inside a decoded frame.
 
-Software derives the source dot period from the measured frame period and maps
-all 640 output pixels onto that recovered grid. It searches five candidate
-phase positions automatically and samples a three-tick window around the best
-position. The `stale_replaced` statistic counts completed raw frames superseded
-before a consumer used them; it normally increases and does not indicate a
-capture failure. Pico SDK's TinyUSB submodule must be initialized when building
-this USB-enabled target.
+Core 0 converts the newest raw frame into one-bit pixels. Three decoded buffers
+ensure that one complete pending frame remains available while another is being
+displayed and the third is filled. Core 1 changes decoded-frame ownership only
+at the start of a VGA frame, preventing tearing and handoff starvation. All 640
+source pixels are output; an additional black pixel in the front porch returns
+the RGB DAC to black before synchronization.
 
-## Live capture-to-VGA bridge
+## USB controls
 
-`build/src/p2000m_live_converter.uf2` combines capture and VGA output. It shows
-the latest complete 640 x 288 P2000M frame one-to-one in the center of a 640 x
-480, 60 Hz VGA raster, with 96 black lines above and below. Core 0 converts the
-latest oversampled source frame into one-bit pixels; core 1 prepares VGA
-scanlines. Decoded-frame ownership changes only at the start of a VGA frame, so
-the asynchronous 50.095 Hz input is repeated as needed without tearing.
+Connect a terminal to the Pico USB CDC serial port. Commands are
+case-insensitive and execute when Enter is pressed. Command mode echoes input,
+supports Backspace/Delete, displays a `vid2vga>` prompt, and produces no
+unsolicited statistics.
 
-Each active scanline outputs all 640 captured pixels followed by an explicit
-black reset pixel in the VGA front porch. This prevents the final source color
-from leaking into horizontal blanking without sacrificing the last column.
+- `status` or `s`: print capture, decoder, resampler, and VGA statistics.
+- `version` or `v`: print the semantic firmware version.
+- `log`: stream those statistics every two seconds. Press Enter, Escape, or
+  `q` to stop the stream and return to the command prompt.
+- `settings`: print all active settings and whether they are factory defaults,
+  modified in RAM, or saved in flash.
+- `border on`, `border off`, or `border toggle`: control a one-pixel rectangle
+  around the 640 x 288 source image. It uses the foreground color.
+- `scale fit`: expand 288 source lines to the full 480-line VGA height.
+- `scale native`: show the original 288 lines between 96-line margins.
+- `fg <color>`: set the foreground/text color.
+- `bg <color>`: set the background color, including the top and bottom margins.
+- `colors`: list the named presets.
+- `defaults`: restore white on black, border off, and native 1:1 scaling.
+- `save`: explicitly save the current colors, border, scaling mode, and manual
+  phase trim. These settings are restored after reset or power cycling.
+- `factory-reset`: erase the saved configuration and immediately restore the
+  factory display style and zero manual phase trim.
+- `tune` or `j`: run automatic phase tuning and print all candidate scores.
+- `phase +`, `phase -`, or `phase auto`: adjust or clear the manual phase trim.
+- `geometry` or `g`: print coverage totals for all 80 x 24 character cells.
+- `help`, `h`, or `?`: print the command reference.
 
-The USB CDC port reports live statistics every two seconds. `swaps` should
-increase at approximately the input frame rate and `repeats` at approximately
-the 10 Hz difference between VGA and the P2000M. Use `s` for an immediate report
-or `h` for command help. Automatic tuning runs in the background about once per
-five seconds. The `j` command forces a tuning pass and reports the white-sample score
-for every candidate phase. `+` and `-` add a manual trim of one 63 MHz tick
-(15.87 ns, roughly 0.19 source dot); the supported range is -4 through +4. `0`
-clears the manual trim without disabling automatic line-period and phase
-recovery. The `g` command reports white-pixel counts for all 24 source character
-rows and 80 source character columns, including explicit top, bottom, left, and
-right boundary totals.
+Colors may be selected by name (`black`, `white`, `green`, `amber`, `cyan`,
+`magenta`, `red`, `blue`, `yellow`, or `gray`) or entered as `RRGGBB`,
+`#RRGGBB`, or `0xRRGGBB`. The VGA output hardware is RGB444, so the upper four
+bits of each entered eight-bit channel determine the physical output level.
+
+Settings are only written when `save` is entered, avoiding unnecessary flash
+wear while experimenting. Two versioned, checksummed flash records are used in
+alternation, so an interrupted save leaves the previous valid configuration
+available. Saving or erasing briefly pauses both cores and may cause a momentary
+VGA blink. Automatic phase selection is always recalculated from the live
+signal; only the user's manual phase trim is persistent.
+
+Automatic tuning runs about once every five seconds. The `stale_replaced`
+counter normally increases when newer raw frames supersede frames that no
+consumer needed; it is not itself a capture failure.

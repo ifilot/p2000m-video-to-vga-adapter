@@ -21,7 +21,7 @@ endif()
 include("${PICO_SDK_PATH}/external/pico_sdk_import.cmake")
 include("${PICO_EXTRAS_PATH}/external/pico_extras_import.cmake")
 
-project(p2000m_video_to_vga C CXX ASM)
+project(p2000m_vid2vga_firmware VERSION 0.1.0 LANGUAGES C CXX ASM)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
