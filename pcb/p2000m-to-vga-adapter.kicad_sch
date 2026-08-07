@@ -5486,17 +5486,17 @@
 	)
 	(global_label "VIDEO"
 		(shape input)
-		(at 30.48 34.29 180)
+		(at 45.72 34.29 0)
 		(fields_autoplaced yes)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
-			(justify right)
+			(justify left)
 		)
 		(uuid "84dffa78-f694-449c-bcaa-2e4e04479deb")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 22.0519 34.29 0)
+			(at 54.1481 34.29 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5504,7 +5504,7 @@
 				(font
 					(size 1.27 1.27)
 				)
-				(justify right)
+				(justify left)
 			)
 		)
 	)
@@ -5648,17 +5648,17 @@
 	)
 	(global_label "VSYNC"
 		(shape input)
-		(at 45.72 31.75 0)
+		(at 30.48 31.75 180)
 		(fields_autoplaced yes)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
-			(justify left)
+			(justify right)
 		)
 		(uuid "99856af5-9feb-4cdf-b26e-ba7abbdb00b4")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 54.6924 31.75 0)
+			(at 21.5076 31.75 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5666,7 +5666,7 @@
 				(font
 					(size 1.27 1.27)
 				)
-				(justify left)
+				(justify right)
 			)
 		)
 	)
@@ -5968,17 +5968,17 @@
 	)
 	(global_label "HSYNC"
 		(shape input)
-		(at 45.72 34.29 0)
+		(at 30.48 34.29 180)
 		(fields_autoplaced yes)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
-			(justify left)
+			(justify right)
 		)
 		(uuid "ced76dc0-19cd-4556-9da9-c174bf415602")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 54.9343 34.29 0)
+			(at 21.2657 34.29 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5986,7 +5986,7 @@
 				(font
 					(size 1.27 1.27)
 				)
-				(justify left)
+				(justify right)
 			)
 		)
 	)
@@ -6842,7 +6842,8 @@
 	)
 	(symbol
 		(lib_id "power:GND")
-		(at 30.48 31.75 270)
+		(at 45.72 31.75 90)
+		(mirror x)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -6853,7 +6854,7 @@
 		(fields_autoplaced yes)
 		(uuid "160894d8-603e-4be1-8f54-c5a56cad363f")
 		(property "Reference" "#PWR025"
-			(at 24.13 31.75 0)
+			(at 52.07 31.75 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6864,7 +6865,7 @@
 			)
 		)
 		(property "Value" "GND"
-			(at 29.21 27.94 90)
+			(at 46.99 27.94 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -6874,7 +6875,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 30.48 31.75 0)
+			(at 45.72 31.75 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6885,7 +6886,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 30.48 31.75 0)
+			(at 45.72 31.75 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6896,7 +6897,7 @@
 			)
 		)
 		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 30.48 31.75 0)
+			(at 45.72 31.75 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
