@@ -83,6 +83,9 @@ static volatile uint32_t generated_vga_frames;
 static volatile uint32_t source_frame_swaps;
 static volatile uint32_t repeated_vga_frames;
 static volatile uint32_t blank_vga_frames;
+static volatile uint32_t decoded_source_frames;
+static volatile uint32_t last_decode_us;
+static volatile uint32_t maximum_decode_us;
 
 static void initialize_monochrome_lookup(void) {
     for (unsigned value = 0; value < 256u; ++value) {
@@ -102,6 +105,7 @@ static void initialize_decoded_buffers(void) {
 }
 
 static bool decode_latest_source_frame(void) {
+    const uint64_t decode_started = time_us_64();
     uint32_t sequence;
     const int raw_index = p2000m_capture_acquire_latest_frame(&sequence);
     if (raw_index < 0) {
@@ -152,6 +156,15 @@ static bool decode_latest_source_frame(void) {
     decoded_sequences[decoded_index] = sequence;
     decoded_states[decoded_index] = DECODED_READY;
     spin_unlock(decoded_lock, publish_saved);
+
+    const uint32_t decode_us = (uint32_t)(time_us_64() - decode_started);
+    __atomic_store_n(&last_decode_us, decode_us, __ATOMIC_RELAXED);
+    const uint32_t previous_maximum =
+        __atomic_load_n(&maximum_decode_us, __ATOMIC_RELAXED);
+    if (decode_us > previous_maximum) {
+        __atomic_store_n(&maximum_decode_us, decode_us, __ATOMIC_RELAXED);
+    }
+    __atomic_add_fetch(&decoded_source_frames, 1u, __ATOMIC_RELAXED);
     return true;
 }
 
@@ -291,16 +304,25 @@ static void print_statistics(void) {
         __atomic_load_n(&blank_vga_frames, __ATOMIC_RELAXED);
     const uint32_t sequence =
         __atomic_load_n(&displayed_sequence, __ATOMIC_RELAXED);
+    const uint32_t decoded =
+        __atomic_load_n(&decoded_source_frames, __ATOMIC_RELAXED);
+    const uint32_t decode_us =
+        __atomic_load_n(&last_decode_us, __ATOMIC_RELAXED);
+    const uint32_t decode_max_us =
+        __atomic_load_n(&maximum_decode_us, __ATOMIC_RELAXED);
 
     if (capture.last_frame_period_us == 0) {
         printf("LIVE capture_frames=%" PRIu32
                " waiting_for_input vga_frames=%" PRIu32
                " swaps=%" PRIu32 " repeats=%" PRIu32
                " blank=%" PRIu32 " displayed_sequence=%" PRIu32
+               " decoded_frames=%" PRIu32 " decode_us=%" PRIu32
+               " decode_max_us=%" PRIu32
                " auto_phase_ticks=%" PRId32
                " manual_trim_ticks=%" PRId32 "\n",
                capture.captured_frames, vga_frames, swaps, repeats, blanks,
-               sequence, capture.auto_phase_ticks,
+               sequence, decoded, decode_us, decode_max_us,
+               capture.auto_phase_ticks,
                capture.manual_phase_ticks);
         return;
     }
@@ -314,18 +336,23 @@ static void print_statistics(void) {
            " vga_frames=%" PRIu32 " swaps=%" PRIu32
            " repeats=%" PRIu32 " blank=%" PRIu32
            " displayed_sequence=%" PRIu32
+           " decoded_frames=%" PRIu32 " decode_us=%" PRIu32
+           " decode_max_us=%" PRIu32
            " line_ticks=%" PRIu32 ".%03" PRIu32
            " auto_phase_ticks=%" PRId32
            " manual_trim_ticks=%" PRId32
-           " autotune_runs=%" PRIu32 " tune_score=%" PRIu32 "\n",
+           " autotune_runs=%" PRIu32 " tune_score=%" PRIu32
+           " tune_us=%" PRIu32 " tune_max_us=%" PRIu32 "\n",
            capture.captured_frames, capture.last_frame_period_us,
            rate_millihz / 1000u, rate_millihz % 1000u,
            locked ? "yes" : "no", capture.stale_frames_replaced,
            vga_frames, swaps, repeats, blanks, sequence,
+           decoded, decode_us, decode_max_us,
            capture.recovered_line_ticks_q16 >> 16,
            ((capture.recovered_line_ticks_q16 & 0xffffu) * 1000u) >> 16,
            capture.auto_phase_ticks, capture.manual_phase_ticks,
-           capture.autotune_runs, capture.autotune_score);
+           capture.autotune_runs, capture.autotune_score,
+           capture.last_autotune_us, capture.maximum_autotune_us);
 }
 
 static void print_source_geometry(void) {
@@ -456,7 +483,7 @@ int main(void) {
         const uint64_t now = time_us_64();
         if (now >= next_automatic_tune) {
             const bool tuned = p2000m_capture_autotune(NULL);
-            next_automatic_tune = now + (tuned ? 1000000u : 100000u);
+            next_automatic_tune = now + (tuned ? 5000000u : 100000u);
         }
         (void)decode_latest_source_frame();
 

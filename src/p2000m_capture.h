@@ -34,6 +34,8 @@ typedef struct {
     uint32_t recovered_line_ticks_q16;
     uint32_t autotune_runs;
     uint32_t autotune_score;
+    uint32_t last_autotune_us;
+    uint32_t maximum_autotune_us;
     int32_t auto_phase_ticks;
     int32_t manual_phase_ticks;
 } p2000m_capture_stats_t;

@@ -78,7 +78,7 @@ The USB CDC port reports live statistics every two seconds. `swaps` should
 increase at approximately the input frame rate and `repeats` at approximately
 the 10 Hz difference between VGA and the P2000M. Use `s` for an immediate report
 or `h` for command help. Automatic tuning runs in the background about once per
-second. The `j` command forces a tuning pass and reports the white-sample score
+five seconds. The `j` command forces a tuning pass and reports the white-sample score
 for every candidate phase. `+` and `-` add a manual trim of one 63 MHz tick
 (15.87 ns, roughly 0.19 source dot); the supported range is -4 through +4. `0`
 clears the manual trim without disabling automatic line-period and phase

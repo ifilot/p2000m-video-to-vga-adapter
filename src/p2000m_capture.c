@@ -72,6 +72,8 @@ static uint32_t filtered_frame_period_us_q8;
 static uint32_t recovered_line_ticks_q16 = NOMINAL_LINE_TICKS << 16;
 static uint32_t autotune_runs;
 static uint32_t autotune_score;
+static uint32_t last_autotune_us;
+static uint32_t maximum_autotune_us;
 static int32_t auto_phase_ticks = TUNING_INITIAL_PHASE_TICK;
 static int32_t manual_phase_ticks;
 static unsigned active_pixel_map;
@@ -395,6 +397,7 @@ bool p2000m_capture_autotune(p2000m_capture_tuning_report_t *report) {
     if (buffer_index < 0) {
         return false;
     }
+    const uint64_t tune_started = time_us_64();
 
     const uint32_t saved = spin_lock_blocking(buffer_lock);
     const uint32_t period_us = last_frame_period_us;
@@ -447,6 +450,17 @@ bool p2000m_capture_autotune(p2000m_capture_tuning_report_t *report) {
     }
 
     int selected_phase = TUNING_FIRST_PHASE_TICK + (int)best_index;
+    // A blank or almost blank source frame does not carry enough information
+    // to justify moving a previously established phase lock.
+    if (previous_runs != 0u && best_score < 256u) {
+        selected_phase = previous_phase;
+        if (previous_phase >= TUNING_FIRST_PHASE_TICK &&
+            previous_phase < TUNING_FIRST_PHASE_TICK +
+                                 P2000M_CAPTURE_TUNING_CANDIDATES) {
+            best_score = scores[(unsigned)(previous_phase -
+                                           TUNING_FIRST_PHASE_TICK)];
+        }
+    }
     if (previous_runs != 0u &&
         previous_phase >= TUNING_FIRST_PHASE_TICK &&
         previous_phase < TUNING_FIRST_PHASE_TICK +
@@ -461,12 +475,17 @@ bool p2000m_capture_autotune(p2000m_capture_tuning_report_t *report) {
     }
 
     publish_pixel_map(line_ticks_q16, selected_phase, manual_trim);
+    const uint32_t tune_us = (uint32_t)(time_us_64() - tune_started);
 
     const uint32_t update_saved = spin_lock_blocking(buffer_lock);
     filtered_frame_period_us_q8 = filtered_period_q8;
     recovered_line_ticks_q16 = line_ticks_q16;
     auto_phase_ticks = selected_phase;
     autotune_score = best_score;
+    last_autotune_us = tune_us;
+    if (tune_us > maximum_autotune_us) {
+        maximum_autotune_us = tune_us;
+    }
     ++autotune_runs;
     spin_unlock(buffer_lock, update_saved);
 
@@ -499,6 +518,8 @@ void p2000m_capture_get_stats(p2000m_capture_stats_t *stats) {
     stats->recovered_line_ticks_q16 = recovered_line_ticks_q16;
     stats->autotune_runs = autotune_runs;
     stats->autotune_score = autotune_score;
+    stats->last_autotune_us = last_autotune_us;
+    stats->maximum_autotune_us = maximum_autotune_us;
     stats->auto_phase_ticks = auto_phase_ticks;
     stats->manual_phase_ticks = manual_phase_ticks;
     spin_unlock(buffer_lock, saved);

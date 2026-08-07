@@ -45,7 +45,8 @@ static void print_capture_stats(void) {
            " line_ticks=%" PRIu32 ".%03" PRIu32
            " auto_phase_ticks=%" PRId32
            " manual_trim_ticks=%" PRId32
-           " autotune_runs=%" PRIu32 "\n",
+           " autotune_runs=%" PRIu32 " tune_us=%" PRIu32
+           " tune_max_us=%" PRIu32 "\n",
            stats.captured_frames, period,
            line_period_ns / 1000u, line_period_ns % 1000u,
            frame_rate_millihz / 1000u, frame_rate_millihz % 1000u,
@@ -53,7 +54,8 @@ static void print_capture_stats(void) {
            stats.recovered_line_ticks_q16 >> 16,
            ((stats.recovered_line_ticks_q16 & 0xffffu) * 1000u) >> 16,
            stats.auto_phase_ticks, stats.manual_phase_ticks,
-           stats.autotune_runs);
+           stats.autotune_runs, stats.last_autotune_us,
+           stats.maximum_autotune_us);
 }
 
 static void print_ascii_preview(void) {
