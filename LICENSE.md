@@ -17,6 +17,7 @@ The project-owned firmware and supporting software are licensed under the
 (`GPL-3.0-or-later`). This covers:
 
 - `src/`
+- `gui/`, except its `README.md`
 - `screentest/`, including its source, build file, and generated cartridge image
 - the top-level `CMakeLists.txt`
 - `.github/workflows/`
@@ -49,8 +50,8 @@ The complete license text is in
 
 ## Documentation
 
-`README.md`, `CHANGELOG.md`, `LICENSE.md`, `THIRD_PARTY_NOTICES.md`, and
-`pcb/LICENSE.md` are licensed under **Creative Commons Attribution 4.0
+`README.md`, `CHANGELOG.md`, `LICENSE.md`, `THIRD_PARTY_NOTICES.md`,
+`gui/README.md`, and `pcb/LICENSE.md` are licensed under **Creative Commons Attribution 4.0
 International** (`CC-BY-4.0`), except for quoted third-party license notices,
 which remain under their stated terms. The complete license text is in
 [`LICENSES/CC-BY-4.0.txt`](LICENSES/CC-BY-4.0.txt).

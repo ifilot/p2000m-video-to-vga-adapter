@@ -25,6 +25,7 @@
 #include "pico/scanvideo/composable_scanline.h"
 #include "pico/stdio_usb.h"
 #include "pico/stdlib.h"
+#include "tusb.h"
 
 /** Semantic firmware version supplied by the top-level CMake project. */
 static const char firmware_version[] = "v" P2000M_VID2VGA_VERSION;
@@ -57,6 +58,14 @@ enum {
     COMMAND_BUFFER_SIZE = 64,
     /** Delay between statistics records while USB log streaming is active. */
     USB_LOG_INTERVAL_US = 2000000,
+    /** Fixed binary header prepended to every streamed screen frame. */
+    SCREEN_FRAME_HEADER_SIZE = 48,
+    /** Packed bytes in one decoded 640 x 288 monochrome framebuffer. */
+    SCREEN_FRAME_PAYLOAD_SIZE = DECODED_WORDS_PER_FRAME * sizeof(uint32_t),
+    /** Maximum bytes offered to TinyUSB during one foreground-loop pass. */
+    SCREEN_TX_SERVICE_BUDGET = 1024,
+    /** Source-frame sequence advance used to limit streaming to about 25 Hz. */
+    SCREEN_SEQUENCE_STEP = 2,
     /** Number of alternating flash sectors used for atomic settings updates. */
     SETTINGS_SLOT_COUNT = 2,
     /** First settings sector; the RP2350's final flash sector stays reserved. */
@@ -129,6 +138,8 @@ typedef enum {
     USB_COMMAND_MODE,
     /** Periodic statistics stream; one exit key restores the prompt. */
     USB_LOG_MODE,
+    /** Host-paced binary 640 x 288 monochrome framebuffer stream. */
+    USB_SCREEN_MODE,
 } usb_interface_mode_t;
 
 /** User-selectable colors and geometry overlay for one VGA frame. */
@@ -242,6 +253,8 @@ static decoded_buffer_state_t decoded_states[DECODED_BUFFER_COUNT];
 static uint32_t decoded_sequences[DECODED_BUFFER_COUNT];
 /** Cross-core lock protecting decoded_states and decoded_sequences. */
 static spin_lock_t *decoded_lock;
+/** Whether the USB transmitter currently holds each decoded buffer immutable. */
+static bool decoded_usb_holds[DECODED_BUFFER_COUNT];
 
 /** Double-buffered byte-to-eight-pixel lookup tables for arbitrary colors. */
 static uint16_t monochrome_pixels[DISPLAY_STYLE_COUNT][256][8];
@@ -285,6 +298,27 @@ static usb_interface_mode_t usb_interface_mode = USB_COMMAND_MODE;
 static bool usb_ignore_next_lf;
 /** Timestamp for the next periodic record in USB_LOG_MODE. */
 static uint64_t next_usb_log_us;
+/** One complete screen-frame header assembled without structure padding. */
+static uint8_t screen_frame_header[SCREEN_FRAME_HEADER_SIZE];
+/** Decoded buffer currently being transmitted, or -1 while idle. */
+static int screen_tx_buffer = -1;
+/** Next unsent byte within screen_frame_header. */
+static size_t screen_tx_header_offset;
+/** Next unsent byte within the packed decoded framebuffer. */
+static size_t screen_tx_payload_offset;
+/** Sequence represented by screen_tx_buffer. */
+static uint32_t screen_tx_sequence;
+/** Most recently completed USB frame sequence. */
+static uint32_t screen_last_sequence;
+/** Whether screen_last_sequence contains a completed frame. */
+static bool screen_last_sequence_valid;
+/** One frame credit received from the Windows viewer. */
+static bool screen_frame_requested;
+/** Complete screen frames queued to TinyUSB since boot. */
+static uint32_t screen_frames_sent;
+
+/* Refill the CDC transmit FIFO from both the main loop and long decodes. */
+static void service_screen_output(void);
 /** Flash slot holding the newest valid settings record, or -1 when absent. */
 static int saved_settings_slot = -1;
 /** Sequence number of the newest valid settings record. */
@@ -553,7 +587,60 @@ static void initialize_decoded_buffers(void) {
     for (unsigned i = 0; i < DECODED_BUFFER_COUNT; ++i) {
         decoded_states[i] = DECODED_FREE;
         decoded_sequences[i] = 0;
+        decoded_usb_holds[i] = false;
     }
+}
+
+/**
+ * @brief Claim the newest eligible decoded frame for immutable USB reading.
+ *
+ * READY frames remain available to VGA after USB claims them. The currently
+ * displayed IN_USE frame is also eligible, allowing both consumers to hold the
+ * same immutable storage. Sequence filtering limits a responsive host to every
+ * second decoded source frame while still letting a slow host take the newest
+ * available image.
+ *
+ * @param sequence Receives the claimed source sequence number.
+ * @return Buffer index, or -1 when no eligible complete frame exists.
+ */
+static int acquire_decoded_frame_for_usb(uint32_t *sequence) {
+    const uint32_t saved = spin_lock_blocking(decoded_lock);
+    int latest = -1;
+    uint32_t latest_sequence = 0;
+
+    for (unsigned i = 0; i < DECODED_BUFFER_COUNT; ++i) {
+        const bool complete = decoded_states[i] == DECODED_READY ||
+                              decoded_states[i] == DECODED_IN_USE;
+        if (complete && !decoded_usb_holds[i] &&
+            (latest < 0 || decoded_sequences[i] >= latest_sequence)) {
+            latest = (int)i;
+            latest_sequence = decoded_sequences[i];
+        }
+    }
+
+    if (latest >= 0 && screen_last_sequence_valid &&
+        (int32_t)(latest_sequence - screen_last_sequence) <
+            SCREEN_SEQUENCE_STEP) {
+        latest = -1;
+    }
+    if (latest >= 0) {
+        decoded_usb_holds[latest] = true;
+        *sequence = latest_sequence;
+    }
+    spin_unlock(decoded_lock, saved);
+    return latest;
+}
+
+/**
+ * @brief Release a decoded framebuffer previously claimed by USB.
+ *
+ * @param buffer_index Valid decoded buffer index.
+ */
+static void release_decoded_frame_from_usb(unsigned buffer_index) {
+    hard_assert(buffer_index < DECODED_BUFFER_COUNT);
+    const uint32_t saved = spin_lock_blocking(decoded_lock);
+    decoded_usb_holds[buffer_index] = false;
+    spin_unlock(decoded_lock, saved);
 }
 
 /**
@@ -575,7 +662,7 @@ static bool decode_latest_source_frame(void) {
     const uint32_t saved = spin_lock_blocking(decoded_lock);
     int decoded_index = -1;
     for (unsigned i = 0; i < DECODED_BUFFER_COUNT; ++i) {
-        if (decoded_states[i] == DECODED_FREE) {
+        if (decoded_states[i] == DECODED_FREE && !decoded_usb_holds[i]) {
             decoded_index = (int)i;
             break;
         }
@@ -584,13 +671,18 @@ static bool decode_latest_source_frame(void) {
         uint32_t oldest_sequence = UINT32_MAX;
         for (unsigned i = 0; i < DECODED_BUFFER_COUNT; ++i) {
             if (decoded_states[i] == DECODED_READY &&
+                !decoded_usb_holds[i] &&
                 decoded_sequences[i] < oldest_sequence) {
                 decoded_index = (int)i;
                 oldest_sequence = decoded_sequences[i];
             }
         }
     }
-    hard_assert(decoded_index >= 0);
+    if (decoded_index < 0) {
+        spin_unlock(decoded_lock, saved);
+        p2000m_capture_release_frame((unsigned)raw_index);
+        return false;
+    }
     decoded_states[decoded_index] = DECODED_FILLING;
     spin_unlock(decoded_lock, saved);
 
@@ -610,6 +702,13 @@ static bool decode_latest_source_frame(void) {
                 *decoded++ = output;
                 output = 0;
             }
+        }
+
+        // Frame decoding can occupy core 0 for long enough to starve a USB
+        // stream. Refill the asynchronously drained CDC FIFO at bounded
+        // intervals without changing the decoder or VGA buffer ownership.
+        if (usb_interface_mode == USB_SCREEN_MODE && (y & 7u) == 7u) {
+            service_screen_output();
         }
     }
     p2000m_capture_release_frame((unsigned)raw_index);
@@ -905,10 +1004,12 @@ static void print_statistics(void) {
                " blank=%" PRIu32 " displayed_sequence=%" PRIu32
                " decoded_frames=%" PRIu32 " decode_us=%" PRIu32
                " decode_max_us=%" PRIu32
+               " screen_frames=%" PRIu32
                " auto_phase_ticks=%" PRId32
                " manual_trim_ticks=%" PRId32 "\n",
                capture.captured_frames, vga_frames, swaps, repeats, blanks,
                sequence, decoded, decode_us, decode_max_us,
+               screen_frames_sent,
                capture.auto_phase_ticks,
                capture.manual_phase_ticks);
         return;
@@ -925,6 +1026,7 @@ static void print_statistics(void) {
            " displayed_sequence=%" PRIu32
            " decoded_frames=%" PRIu32 " decode_us=%" PRIu32
            " decode_max_us=%" PRIu32
+           " screen_frames=%" PRIu32
            " line_ticks=%" PRIu32 ".%03" PRIu32
            " auto_phase_ticks=%" PRId32
            " manual_trim_ticks=%" PRId32
@@ -934,7 +1036,7 @@ static void print_statistics(void) {
            rate_millihz / 1000u, rate_millihz % 1000u,
            locked ? "yes" : "no", capture.stale_frames_replaced,
            vga_frames, swaps, repeats, blanks, sequence,
-           decoded, decode_us, decode_max_us,
+           decoded, decode_us, decode_max_us, screen_frames_sent,
            capture.recovered_line_ticks_q16 >> 16,
            ((capture.recovered_line_ticks_q16 & 0xffffu) * 1000u) >> 16,
            capture.auto_phase_ticks, capture.manual_phase_ticks,
@@ -1167,6 +1269,175 @@ static display_style_t current_display_style(void) {
     return display_styles[index];
 }
 
+/** Store an unsigned 16-bit value in the screen protocol's little-endian form. */
+static void screen_store_u16(uint8_t *destination, uint16_t value) {
+    destination[0] = (uint8_t)value;
+    destination[1] = (uint8_t)(value >> 8u);
+}
+
+/** Store an unsigned 32-bit value in the screen protocol's little-endian form. */
+static void screen_store_u32(uint8_t *destination, uint32_t value) {
+    destination[0] = (uint8_t)value;
+    destination[1] = (uint8_t)(value >> 8u);
+    destination[2] = (uint8_t)(value >> 16u);
+    destination[3] = (uint8_t)(value >> 24u);
+}
+
+/**
+ * @brief Stop an in-progress screen transfer and release its framebuffer.
+ */
+static void abort_screen_transfer(void) {
+    if (screen_tx_buffer >= 0) {
+        release_decoded_frame_from_usb((unsigned)screen_tx_buffer);
+    }
+    screen_tx_buffer = -1;
+    screen_tx_header_offset = 0u;
+    screen_tx_payload_offset = 0u;
+    screen_frame_requested = false;
+}
+
+/**
+ * @brief Assemble a stable version-one binary header for one decoded frame.
+ *
+ * The payload is the RP2350's native little-endian array of 32-bit words. In
+ * each numeric word, the leftmost pixel is bit 31 and foreground is one.
+ * Display colors and geometry flags let the host reproduce the VGA view.
+ */
+static void build_screen_frame_header(uint32_t sequence,
+                                      const uint32_t *frame) {
+    enum {
+        PAYLOAD_WORDS_LITTLE_ENDIAN = 1u << 0,
+        PAYLOAD_PIXELS_MSB_FIRST = 1u << 1,
+        STYLE_BORDER_ENABLED = 1u << 0,
+        STYLE_BORDER_DOTTED = 1u << 1,
+        STYLE_VERTICAL_STRETCH = 1u << 2,
+    };
+    const display_style_t style = current_display_style();
+    uint32_t style_flags = 0u;
+    if (style.border_enabled) {
+        style_flags |= STYLE_BORDER_ENABLED;
+    }
+    if (style.border_dotted) {
+        style_flags |= STYLE_BORDER_DOTTED;
+    }
+    if (style.vertical_stretch_enabled) {
+        style_flags |= STYLE_VERTICAL_STRETCH;
+    }
+
+    memset(screen_frame_header, 0, sizeof(screen_frame_header));
+    memcpy(screen_frame_header, "P2VF", 4u);
+    screen_frame_header[4] = 1u;  // Protocol version.
+    screen_frame_header[5] = 1u;  // Complete monochrome framebuffer.
+    screen_store_u16(&screen_frame_header[6],
+                     PAYLOAD_WORDS_LITTLE_ENDIAN |
+                         PAYLOAD_PIXELS_MSB_FIRST);
+    screen_store_u32(&screen_frame_header[8], sequence);
+    screen_store_u32(&screen_frame_header[12], time_us_32());
+    screen_store_u16(&screen_frame_header[16], P2000M_CAPTURE_WIDTH);
+    screen_store_u16(&screen_frame_header[18], P2000M_CAPTURE_HEIGHT);
+    screen_store_u16(&screen_frame_header[20],
+                     P2000M_CAPTURE_WIDTH / 8u);
+    screen_store_u16(&screen_frame_header[22], SCREEN_FRAME_HEADER_SIZE);
+    screen_store_u32(&screen_frame_header[24], SCREEN_FRAME_PAYLOAD_SIZE);
+    screen_store_u32(&screen_frame_header[28],
+                     settings_crc32(frame, SCREEN_FRAME_PAYLOAD_SIZE));
+    screen_store_u32(&screen_frame_header[32], style.foreground_rgb);
+    screen_store_u32(&screen_frame_header[36], style.background_rgb);
+    screen_store_u32(&screen_frame_header[40], style.border_rgb);
+    screen_store_u32(&screen_frame_header[44], style_flags);
+}
+
+/**
+ * @brief Claim the newest eligible frame after the host has granted credit.
+ */
+static void begin_requested_screen_frame(void) {
+    if (!screen_frame_requested || screen_tx_buffer >= 0) {
+        return;
+    }
+
+    uint32_t sequence = 0u;
+    const int buffer_index = acquire_decoded_frame_for_usb(&sequence);
+    if (buffer_index < 0) {
+        return;
+    }
+
+    screen_frame_requested = false;
+    screen_tx_buffer = buffer_index;
+    screen_tx_sequence = sequence;
+    screen_tx_header_offset = 0u;
+    screen_tx_payload_offset = 0u;
+    build_screen_frame_header(
+        sequence, decoded_frames[(unsigned)buffer_index]);
+}
+
+/**
+ * @brief Feed a bounded part of the current binary frame to TinyUSB.
+ *
+ * The function never waits for FIFO capacity. A host which stops reading merely
+ * stops progress until it disconnects or requests console mode; VGA and capture
+ * continue independently.
+ */
+static void service_screen_output(void) {
+    if (usb_interface_mode != USB_SCREEN_MODE || !stdio_usb_connected()) {
+        abort_screen_transfer();
+        return;
+    }
+
+    begin_requested_screen_frame();
+    if (screen_tx_buffer < 0) {
+        return;
+    }
+
+    size_t budget = SCREEN_TX_SERVICE_BUDGET;
+    while (budget != 0u) {
+        const uint32_t available = tud_cdc_write_available();
+        if (available == 0u) {
+            break;
+        }
+
+        const uint8_t *source;
+        size_t remaining;
+        if (screen_tx_header_offset < SCREEN_FRAME_HEADER_SIZE) {
+            source = &screen_frame_header[screen_tx_header_offset];
+            remaining = SCREEN_FRAME_HEADER_SIZE - screen_tx_header_offset;
+        } else {
+            source = (const uint8_t *)decoded_frames[screen_tx_buffer] +
+                     screen_tx_payload_offset;
+            remaining = SCREEN_FRAME_PAYLOAD_SIZE - screen_tx_payload_offset;
+        }
+
+        size_t count = remaining;
+        if (count > available) {
+            count = available;
+        }
+        if (count > budget) {
+            count = budget;
+        }
+        const uint32_t written = tud_cdc_write(source, (uint32_t)count);
+        if (written == 0u) {
+            break;
+        }
+        budget -= written;
+
+        if (screen_tx_header_offset < SCREEN_FRAME_HEADER_SIZE) {
+            screen_tx_header_offset += written;
+        } else {
+            screen_tx_payload_offset += written;
+        }
+
+        if (screen_tx_header_offset == SCREEN_FRAME_HEADER_SIZE &&
+            screen_tx_payload_offset == SCREEN_FRAME_PAYLOAD_SIZE) {
+            release_decoded_frame_from_usb((unsigned)screen_tx_buffer);
+            screen_tx_buffer = -1;
+            screen_last_sequence = screen_tx_sequence;
+            screen_last_sequence_valid = true;
+            ++screen_frames_sent;
+            break;
+        }
+    }
+    tud_cdc_write_flush();
+}
+
 /**
  * @brief Erase sectors and optionally program one settings page while XIP-safe.
  *
@@ -1347,11 +1618,29 @@ static void print_firmware_license(void) {
  * @return Nothing.
  */
 static void enter_usb_command_mode(void) {
+    abort_screen_transfer();
     usb_interface_mode = USB_COMMAND_MODE;
     usb_command_length = 0u;
     usb_command_overflow = false;
     printf("\r\nCommand mode. Enter HELP for available commands.\r\n");
     print_usb_prompt();
+}
+
+/**
+ * @brief Leave the console and prepare host-paced binary screen output.
+ */
+static void enter_usb_screen_mode(void) {
+    abort_screen_transfer();
+    screen_last_sequence_valid = false;
+    usb_command_length = 0u;
+    usb_command_overflow = false;
+    printf("SCREEN mode=binary version=1 width=%u height=%u fps=%u.%03u "
+           "header=%u payload=%u credit=frame exit=console\n",
+           P2000M_CAPTURE_WIDTH, P2000M_CAPTURE_HEIGHT,
+           25047u / 1000u, 25047u % 1000u,
+           SCREEN_FRAME_HEADER_SIZE, SCREEN_FRAME_PAYLOAD_SIZE);
+    stdio_flush();
+    usb_interface_mode = USB_SCREEN_MODE;
 }
 
 /**
@@ -1376,6 +1665,7 @@ static void print_help(void) {
            "  version | v                show the firmware version\n"
            "  license                    copyright and license information\n"
            "  log                        stream statistics every two seconds\n"
+           "  screen                     enter host-paced binary screen mode\n"
            "  settings                   current runtime and storage settings\n"
            "  border [on|off|toggle]     control the visible-area rectangle\n"
            "  border-color <color>       set the independent border color\n"
@@ -1460,6 +1750,9 @@ static void process_usb_command(char *command) {
         print_firmware_license();
     } else if (strcmp(command, "log") == 0) {
         enter_usb_log_mode();
+    } else if (strcmp(command, "screen") == 0 ||
+               strcmp(command, "stream") == 0) {
+        enter_usb_screen_mode();
     } else if (strcmp(command, "settings") == 0) {
         print_display_settings();
     } else if (strcmp(command, "colors") == 0) {
@@ -1611,6 +1904,34 @@ static void poll_usb_commands(void) {
             }
         }
 
+        if (usb_interface_mode == USB_SCREEN_MODE) {
+            if (character == '\r' || character == '\n') {
+                usb_ignore_next_lf = character == '\r';
+                if (!usb_command_overflow && usb_command_length != 0u) {
+                    usb_command_buffer[usb_command_length] = '\0';
+                    char *screen_command =
+                        normalize_command(usb_command_buffer);
+                    if (strcmp(screen_command, "frame") == 0) {
+                        screen_frame_requested = true;
+                    } else if (strcmp(screen_command, "console") == 0 ||
+                               strcmp(screen_command, "stop") == 0) {
+                        tud_cdc_write_clear();
+                        enter_usb_command_mode();
+                    }
+                }
+                usb_command_length = 0u;
+                usb_command_overflow = false;
+            } else if (character >= 0x20 && character <= 0x7e) {
+                if (usb_command_length + 1u < COMMAND_BUFFER_SIZE) {
+                    usb_command_buffer[usb_command_length++] =
+                        (char)character;
+                } else {
+                    usb_command_overflow = true;
+                }
+            }
+            continue;
+        }
+
         if (usb_interface_mode == USB_LOG_MODE) {
             if (character == '\r' || character == '\n' ||
                 character == 0x1b || character == 'q' || character == 'Q') {
@@ -1664,6 +1985,9 @@ int main(void) {
         panic("Unable to set the 126 MHz system clock");
     }
 
+    // The application initializes TinyUSB while stdio_usb retains the default
+    // CDC descriptors and installs its low-priority endpoint-service worker.
+    tusb_init();
     stdio_init_all();
     validate_settings_flash_region();
     display_style_t initial_style = default_display_style();
@@ -1702,6 +2026,7 @@ int main(void) {
 
         if (!stdio_usb_connected()) {
             announced = false;
+            abort_screen_transfer();
             usb_interface_mode = USB_COMMAND_MODE;
             usb_command_length = 0u;
             usb_command_overflow = false;
@@ -1727,7 +2052,9 @@ int main(void) {
         poll_usb_commands();
 
         const uint64_t status_now = time_us_64();
-        if (usb_interface_mode == USB_LOG_MODE &&
+        if (usb_interface_mode == USB_SCREEN_MODE) {
+            service_screen_output();
+        } else if (usb_interface_mode == USB_LOG_MODE &&
             status_now >= next_usb_log_us) {
             print_statistics();
             next_usb_log_us = status_now + USB_LOG_INTERVAL_US;

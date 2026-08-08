@@ -75,6 +75,24 @@ Flash the single generated image:
 build/src/p2000m-vid2vga-firmware.uf2
 ```
 
+### Windows screen viewer
+
+The `gui` directory contains a Qt 6 application for Windows. It automatically
+finds Raspberry Pi Pico CDC ports, verifies the VID2VGA firmware, switches the
+adapter into binary screen mode, and displays complete CRC-checked frames. It
+returns the adapter to console mode when Disconnect is selected or the window
+is closed. Its Adapter menu can configure colors, borders, scaling, sampling
+phase, and optional persistent storage through the firmware's console.
+
+Build it from an MSYS2 UCRT64 shell with Qt 6 installed:
+
+```sh
+cmake -S gui -B build-gui -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-gui
+```
+
+See [`gui/README.md`](gui/README.md) for deployment instructions.
+
 ## Video capture and VGA conversion
 
 The P2000M connector does not carry a VGA-compatible raster. It exposes a
@@ -198,6 +216,9 @@ unsolicited statistics.
   location.
 - `log`: stream those statistics every two seconds. Press Enter, Escape, or
   `q` to stop the stream and return to the command prompt.
+- `screen`: enter the host-paced binary framebuffer interface used by the
+  Windows viewer. In that mode `frame` grants one frame of transmit credit and
+  `console` returns to the normal terminal interface.
 - `settings`: print all active settings and whether they are factory defaults,
   modified in RAM, or saved in flash.
 - `border on`, `border off`, or `border toggle`: control a one-pixel rectangle
@@ -238,6 +259,12 @@ signal; only the user's manual phase trim is persistent.
 Automatic tuning runs about once every five seconds. The `stale_replaced`
 counter normally increases when newer raw frames supersede frames that no
 consumer needed; it is not itself a capture failure.
+
+Screen mode sends a 48-byte versioned header followed by the native 23,040-byte
+packed monochrome framebuffer. Frames are independently CRC-checked and limited
+to every second decoded source sequence (approximately 25.05 frames per second).
+USB transmission is best effort: a slow or disconnected host can reduce the
+viewer rate but cannot take the framebuffer currently required by VGA output.
 
 ## Licensing
 

@@ -8,6 +8,10 @@ add_executable(${FIRMWARE_TARGET}
     p2000m_capture.c
 )
 
+target_include_directories(${FIRMWARE_TARGET} PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}
+)
+
 set_target_properties(${FIRMWARE_TARGET} PROPERTIES
     OUTPUT_NAME "p2000m-vid2vga-firmware"
 )
@@ -21,6 +25,7 @@ target_link_libraries(${FIRMWARE_TARGET} PRIVATE
     pico_flash
     pico_multicore
     pico_scanvideo_dpi
+    tinyusb_device
     hardware_dma
     hardware_flash
     hardware_pio
@@ -43,6 +48,14 @@ target_compile_definitions(${FIRMWARE_TARGET} PRIVATE
     PICO_SCANVIDEO_MAX_SCANLINE_BUFFER_WORDS=323
     PICO_SCANVIDEO_SCANLINE_BUFFER_COUNT=4
     PICO_SCANVIDEO_RP2350_OVERLAY_SDK_SPINLOCKS=1
+
+    # The application initializes TinyUSB, while pico_stdio_usb's low-priority
+    # IRQ worker services endpoint completions during long framebuffer decodes.
+    PICO_STDIO_USB_ENABLE_TINYUSB_INIT=0
+    PICO_STDIO_USB_ENABLE_IRQ_BACKGROUND_TASK=1
+    PICO_STDIO_USB_USE_DEFAULT_DESCRIPTORS=1
+    CFG_TUD_CDC_RX_BUFSIZE=256
+    CFG_TUD_CDC_TX_BUFSIZE=4096
 )
 
 set_source_files_properties(

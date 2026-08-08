@@ -40,5 +40,6 @@ pcb/.history
 
 # Firmware build output
 build/
+build-gui/
 cmake-build-*/
 .ci-dependencies/

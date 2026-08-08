@@ -9,6 +9,23 @@ All notable changes to the P2000M VID2VGA firmware are documented here. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and releases use [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- A host-paced binary USB screen mode which delivers complete CRC-checked,
+  640 x 288 one-bit frames at up to half the P2000M source rate without taking
+  ownership away from VGA scanout.
+- A Qt 6 Windows viewer which discovers Pico CDC ports, verifies the VID2VGA
+  firmware, enters screen mode automatically, reproduces VGA colors and
+  geometry, and restores console mode when disconnected.
+- Adapter configuration, connection, and About menus in the Windows viewer,
+  including color pickers, border and scaling controls, phase trim, and
+  optional persistent saving through the existing USB console.
+- Smooth or sharp display filtering, pixel-perfect integer scaling, full-screen
+  presentation, and lossless framebuffer screenshots in the Windows viewer.
+- Lower-latency GUI processing to improve full-frame streaming throughput.
+
 ## [0.2.0] - 2026-08-08
 
 ### Added
