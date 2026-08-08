@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 cmake_minimum_required(VERSION 3.13)
 
 # Keep the SDK and extras versions reproducible across local and CI builds.
@@ -44,7 +47,7 @@ if(NOT PICO_EXTRAS_PATH)
 endif()
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/pico_extras_import.cmake")
 
-project(p2000m_vid2vga_firmware VERSION 0.1.0 LANGUAGES C CXX ASM)
+project(p2000m_vid2vga_firmware VERSION 0.2.0 LANGUAGES C CXX ASM)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)

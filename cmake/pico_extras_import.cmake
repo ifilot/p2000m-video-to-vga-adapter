@@ -1,5 +1,9 @@
 # Bundled pico-extras import helper, based on the sdk-2.3.0 import file.
 #
+# SPDX-FileCopyrightText: 2020 Raspberry Pi (Trading) Ltd.
+# SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+# SPDX-License-Identifier: BSD-3-Clause
+#
 # Copyright 2020 Raspberry Pi (Trading) Ltd.
 #
 # Redistribution and use in source and binary forms, with or without

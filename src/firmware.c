@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 /**
  * @file firmware.c
  * @brief Production P2000M capture, resampling, VGA, and USB-control firmware.
@@ -60,7 +65,7 @@ enum {
     /** File-format signature: ASCII "V2GA" when viewed little-endian. */
     SETTINGS_MAGIC = 0x41473256,
     /** On-flash settings structure version. */
-    SETTINGS_VERSION = 1,
+    SETTINGS_VERSION = 2,
     /** Maximum time to coordinate each multicore flash lockout phase. */
     FLASH_LOCKOUT_TIMEOUT_MS = 1000,
     /** Core-start handshake value sent through the multicore FIFO. */
@@ -132,8 +137,12 @@ typedef struct {
     uint32_t foreground_rgb;
     /** Background color as entered by the user, in 0xRRGGBB form. */
     uint32_t background_rgb;
+    /** Border color as entered by the user, in 0xRRGGBB form. */
+    uint32_t border_rgb;
     /** Whether to draw a one-pixel rectangle around the 640 x 288 image. */
     bool border_enabled;
+    /** Whether the border alternates two colored and two clear pixels. */
+    bool border_dotted;
     /** Whether to scale 288 source lines to all 480 active VGA lines. */
     bool vertical_stretch_enabled;
 } display_style_t;
@@ -152,20 +161,44 @@ typedef struct {
     uint32_t foreground_rgb;
     /** Saved background color in 0xRRGGBB form. */
     uint32_t background_rgb;
+    /** Saved border color in 0xRRGGBB form. */
+    uint32_t border_rgb;
     /** Saved border flag encoded as zero or one. */
     uint8_t border_enabled;
+    /** Saved dotted-border flag encoded as zero or one. */
+    uint8_t border_dotted;
     /** Saved vertical-scaling flag encoded as zero or one. */
     uint8_t vertical_stretch_enabled;
     /** Saved manual sampling-phase trim from -4 through +4 ticks. */
     int8_t manual_phase_ticks;
-    /** Reserved zero bytes for compatible format extensions. */
-    uint8_t reserved[5];
     /** CRC-32 of every preceding byte in this structure. */
     uint32_t checksum;
 } persisted_settings_t;
 
 _Static_assert(sizeof(persisted_settings_t) == 32u,
                "Persisted settings format must remain exactly 32 bytes");
+_Static_assert(offsetof(persisted_settings_t, checksum) == 28u,
+               "Persisted settings checksum must remain at byte 28");
+
+/** Version-one record retained solely to migrate existing saved settings. */
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t length;
+    uint32_t sequence;
+    uint32_t foreground_rgb;
+    uint32_t background_rgb;
+    uint8_t border_enabled;
+    uint8_t vertical_stretch_enabled;
+    int8_t manual_phase_ticks;
+    uint8_t reserved[5];
+    uint32_t checksum;
+} persisted_settings_v1_t;
+
+_Static_assert(sizeof(persisted_settings_v1_t) == 32u,
+               "Legacy settings format must remain exactly 32 bytes");
+_Static_assert(offsetof(persisted_settings_v1_t, checksum) == 28u,
+               "Legacy settings checksum must remain at byte 28");
 
 /** RAM-resident parameters consumed by the safe flash callback. */
 typedef struct {
@@ -282,13 +315,16 @@ static uint16_t rgb888_to_scanvideo(uint32_t rgb) {
 /**
  * @brief Construct the factory display configuration.
  *
- * @return White foreground, black background, border off, and native mode.
+ * @return White foreground, black background, magenta solid border off, and
+ *         native mode.
  */
 static display_style_t default_display_style(void) {
     const display_style_t defaults = {
         .foreground_rgb = 0xffffffu,
         .background_rgb = 0x000000u,
+        .border_rgb = 0xff00ffu,
         .border_enabled = false,
+        .border_dotted = false,
         .vertical_stretch_enabled = false,
     };
     return defaults;
@@ -340,12 +376,35 @@ static bool settings_record_is_valid(const persisted_settings_t *record) {
         record->length == sizeof(*record) &&
         (record->foreground_rgb & 0xff000000u) == 0u &&
         (record->background_rgb & 0xff000000u) == 0u &&
+        (record->border_rgb & 0xff000000u) == 0u &&
         record->border_enabled <= 1u &&
+        record->border_dotted <= 1u &&
         record->vertical_stretch_enabled <= 1u &&
         record->manual_phase_ticks >= -4 &&
         record->manual_phase_ticks <= 4 &&
         record->checksum ==
             settings_crc32(record, offsetof(persisted_settings_t, checksum));
+}
+
+/**
+ * @brief Validate a version-one flash record for settings migration.
+ *
+ * @param record Memory-mapped legacy record to validate.
+ * @return true only when the complete legacy record is valid.
+ */
+static bool settings_v1_record_is_valid(
+    const persisted_settings_v1_t *record) {
+    return record->magic == SETTINGS_MAGIC &&
+        record->version == 1u &&
+        record->length == sizeof(*record) &&
+        (record->foreground_rgb & 0xff000000u) == 0u &&
+        (record->background_rgb & 0xff000000u) == 0u &&
+        record->border_enabled <= 1u &&
+        record->vertical_stretch_enabled <= 1u &&
+        record->manual_phase_ticks >= -4 &&
+        record->manual_phase_ticks <= 4 &&
+        record->checksum == settings_crc32(
+            record, offsetof(persisted_settings_v1_t, checksum));
 }
 
 /**
@@ -373,7 +432,10 @@ static bool load_saved_configuration(display_style_t *style) {
     const persisted_settings_t *newest_record = NULL;
     for (unsigned slot = 0; slot < SETTINGS_SLOT_COUNT; ++slot) {
         const persisted_settings_t *candidate = settings_slot_record(slot);
-        if (settings_record_is_valid(candidate) &&
+        const bool valid = settings_record_is_valid(candidate) ||
+            settings_v1_record_is_valid(
+                (const persisted_settings_v1_t *)candidate);
+        if (valid &&
             (newest_record == NULL ||
              settings_sequence_is_newer(candidate->sequence,
                                         newest_record->sequence))) {
@@ -387,12 +449,26 @@ static bool load_saved_configuration(display_style_t *style) {
 
     style->foreground_rgb = newest_record->foreground_rgb;
     style->background_rgb = newest_record->background_rgb;
-    style->border_enabled = newest_record->border_enabled != 0u;
-    style->vertical_stretch_enabled =
-        newest_record->vertical_stretch_enabled != 0u;
+    if (newest_record->version == SETTINGS_VERSION) {
+        style->border_rgb = newest_record->border_rgb;
+        style->border_enabled = newest_record->border_enabled != 0u;
+        style->border_dotted = newest_record->border_dotted != 0u;
+        style->vertical_stretch_enabled =
+            newest_record->vertical_stretch_enabled != 0u;
+        saved_manual_phase_ticks = newest_record->manual_phase_ticks;
+    } else {
+        const persisted_settings_v1_t *legacy =
+            (const persisted_settings_v1_t *)newest_record;
+        // A legacy border used the foreground color and was always solid.
+        style->border_rgb = legacy->foreground_rgb;
+        style->border_enabled = legacy->border_enabled != 0u;
+        style->border_dotted = false;
+        style->vertical_stretch_enabled =
+            legacy->vertical_stretch_enabled != 0u;
+        saved_manual_phase_ticks = legacy->manual_phase_ticks;
+    }
     saved_settings_slot = newest_slot;
     saved_settings_sequence = newest_record->sequence;
-    saved_manual_phase_ticks = newest_record->manual_phase_ticks;
     return true;
 }
 
@@ -656,16 +732,20 @@ static bool map_vga_line_to_source(unsigned vga_y, bool stretch,
  *
  * @param scanline_buffer Scanvideo buffer that receives composable tokens.
  * @param source_y Zero-based source line in the 640 x 288 decoded frame.
- * @param horizontal_border true to replace this entire line with the border.
+ * @param visible_y Line coordinate within the displayed source image.
+ * @param visible_height Height of the displayed source image in VGA lines.
  * @return Nothing.
  */
 static void render_source_scanline(scanvideo_scanline_buffer_t *scanline_buffer,
                                    unsigned source_y,
-                                   bool horizontal_border) {
+                                   unsigned visible_y,
+                                   unsigned visible_height) {
     const display_style_t *style = &display_styles[displayed_style_index];
-    const uint16_t foreground = rgb888_to_scanvideo(style->foreground_rgb);
-    if (horizontal_border) {
-        render_solid_scanline(scanline_buffer, foreground);
+    const bool horizontal_border = style->border_enabled &&
+        (visible_y == 0u || visible_y + 1u == visible_height);
+    const uint16_t border = rgb888_to_scanvideo(style->border_rgb);
+    if (horizontal_border && !style->border_dotted) {
+        render_solid_scanline(scanline_buffer, border);
         return;
     }
 
@@ -698,8 +778,28 @@ static void render_source_scanline(scanvideo_scanline_buffer_t *scanline_buffer,
     }
 
     if (style->border_enabled) {
-        tokens[1] = foreground;
-        destination[-1] = foreground;
+        if (style->border_dotted) {
+            if (horizontal_border) {
+                // Two colored pixels followed by two untouched source pixels.
+                for (unsigned x = 0; x < VGA_WIDTH; ++x) {
+                    if ((x & 3u) < 2u) {
+                        if (x == 0u) {
+                            tokens[1] = border;
+                        } else {
+                            tokens[x + 2u] = border;
+                        }
+                    }
+                }
+            }
+            // Always close the four corners even when a pattern ends in a gap.
+            if (horizontal_border || (visible_y & 3u) < 2u) {
+                tokens[1] = border;
+                destination[-1] = border;
+            }
+        } else {
+            tokens[1] = border;
+            destination[-1] = border;
+        }
     }
 
     // The 641st pixel is outside the active image and returns the resistor DAC
@@ -748,9 +848,7 @@ static void __not_in_flash_func(render_scanline)(
         return;
     }
 
-    const bool horizontal_border = style->border_enabled &&
-        (visible_y == 0u || visible_y + 1u == visible_height);
-    render_source_scanline(scanline_buffer, source_y, horizontal_border);
+    render_source_scanline(scanline_buffer, source_y, visible_y, visible_height);
 }
 
 /**
@@ -1110,11 +1208,12 @@ static int save_current_configuration(void) {
         .sequence = saved_settings_sequence + 1u,
         .foreground_rgb = style.foreground_rgb,
         .background_rgb = style.background_rgb,
+        .border_rgb = style.border_rgb,
         .border_enabled = style.border_enabled ? 1u : 0u,
+        .border_dotted = style.border_dotted ? 1u : 0u,
         .vertical_stretch_enabled =
             style.vertical_stretch_enabled ? 1u : 0u,
         .manual_phase_ticks = (int8_t)capture.manual_phase_ticks,
-        .reserved = {0},
         .checksum = 0u,
     };
     record.checksum =
@@ -1185,16 +1284,20 @@ static void print_display_settings(void) {
                                     : restored_saved_settings ? "saved"
                                                               : "default";
     printf("DISPLAY foreground=#%06" PRIx32 " background=#%06" PRIx32
-           " border=%s scale=%s phase_trim=%" PRId32 " storage=%s\n",
+           " border=%s border_color=#%06" PRIx32
+           " border_style=%s scale=%s phase_trim=%" PRId32
+           " storage=%s\n",
            style.foreground_rgb, style.background_rgb,
            style.border_enabled ? "on" : "off",
+           style.border_rgb,
+           style.border_dotted ? "dotted" : "solid",
            style.vertical_stretch_enabled ? "fit-5:3" : "native-1:1",
            capture.manual_phase_ticks,
            storage_state);
 }
 
 /**
- * @brief Print all named colors accepted by fg and bg commands.
+ * @brief Print all named colors accepted by the display-color commands.
  *
  * @return Nothing.
  */
@@ -1224,6 +1327,18 @@ static void print_usb_prompt(void) {
  */
 static void print_firmware_version(void) {
     printf("P2000M VID2VGA firmware %s\n", firmware_version);
+}
+
+/**
+ * @brief Print the firmware copyright, license, and source location.
+ *
+ * @return Nothing.
+ */
+static void print_firmware_license(void) {
+    printf("Copyright (C) 2026 Ivo Filot.\n"
+           "Free software under GNU GPLv3 or later; there is NO WARRANTY.\n"
+           "License and source: "
+           "https://github.com/ifilot/p2000m-video-to-vga-adapter\n");
 }
 
 /**
@@ -1259,9 +1374,12 @@ static void print_help(void) {
     printf("Commands (press Enter after each command):\n"
            "  status | s                 timing and buffer statistics\n"
            "  version | v                show the firmware version\n"
+           "  license                    copyright and license information\n"
            "  log                        stream statistics every two seconds\n"
            "  settings                   current runtime and storage settings\n"
-           "  border [on|off|toggle]     visible-area rectangle in text color\n"
+           "  border [on|off|toggle]     control the visible-area rectangle\n"
+           "  border-color <color>       set the independent border color\n"
+           "  border-style solid|dotted  select the border pattern\n"
            "  scale fit|native           5:3 full-height or centered 1:1 lines\n"
            "  fg <name|RRGGBB>           set text/foreground color\n"
            "  bg <name|RRGGBB>           set background color\n"
@@ -1301,6 +1419,26 @@ static void set_display_color(const char *argument, bool foreground) {
 }
 
 /**
+ * @brief Apply an independent border color from a command argument.
+ *
+ * @param argument Preset name or six-digit RGB code.
+ * @return Nothing.
+ */
+static void set_border_color(const char *argument) {
+    uint32_t rgb;
+    if (!parse_color(argument, &rgb)) {
+        printf("Invalid color '%s'. Use COLORS to list names or enter RRGGBB.\n",
+               argument);
+        return;
+    }
+
+    display_style_t style = current_display_style();
+    style.border_rgb = rgb;
+    publish_display_style(&style);
+    print_display_settings();
+}
+
+/**
  * @brief Interpret and execute one complete USB command line.
  *
  * @param command Mutable, null-terminated line without CR/LF characters.
@@ -1317,6 +1455,9 @@ static void process_usb_command(char *command) {
         print_statistics();
     } else if (strcmp(command, "version") == 0 || strcmp(command, "v") == 0) {
         print_firmware_version();
+    } else if (strcmp(command, "license") == 0 ||
+               strcmp(command, "copying") == 0) {
+        print_firmware_license();
     } else if (strcmp(command, "log") == 0) {
         enter_usb_log_mode();
     } else if (strcmp(command, "settings") == 0) {
@@ -1337,6 +1478,29 @@ static void process_usb_command(char *command) {
         } else {
             set_display_color(argument, false);
         }
+    } else if (strcmp(command, "border-color") == 0 ||
+               strcmp(command, "border_color") == 0 ||
+               strcmp(command, "bordercolor") == 0) {
+        if (*argument == '\0') {
+            print_display_settings();
+        } else {
+            set_border_color(argument);
+        }
+    } else if (strcmp(command, "border-style") == 0 ||
+               strcmp(command, "border_style") == 0 ||
+               strcmp(command, "borderstyle") == 0) {
+        display_style_t style = current_display_style();
+        if (strcmp(argument, "solid") == 0) {
+            style.border_dotted = false;
+        } else if (strcmp(argument, "dotted") == 0 ||
+                   strcmp(argument, "dot") == 0) {
+            style.border_dotted = true;
+        } else {
+            printf("Usage: border-style solid|dotted\n");
+            return;
+        }
+        publish_display_style(&style);
+        print_display_settings();
     } else if (strcmp(command, "border") == 0) {
         display_style_t style = current_display_style();
         if (*argument == '\0' || strcmp(argument, "toggle") == 0) {
@@ -1553,6 +1717,7 @@ int main(void) {
             sleep_ms(100);
             printf("P2000M VID2VGA firmware %s ready: 640x288 source to "
                    "640x480 VGA.\n", firmware_version);
+            print_firmware_license();
             print_display_settings();
             printf("Enter HELP for available commands.\n");
             announced = true;

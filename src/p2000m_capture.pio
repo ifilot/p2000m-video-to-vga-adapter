@@ -1,3 +1,6 @@
+; SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+; SPDX-License-Identifier: GPL-3.0-or-later
+;
 ; @file p2000m_capture.pio
 ; @brief Line-locked oversampling of conditioned Philips P2000M video.
 ;
@@ -20,17 +23,20 @@
 ;      for 228 sample groups.
 ;
 ; Frame geometry:
-;   VSYNC identifies source line 0. The program skips 24 complete scanlines
-;   (character row 25 and character row 0), then captures 288 lines covering
-;   the visible 80 x 24 character area. Every captured line is independently
-;   anchored to its HSYNC edge, preventing phase error from accumulating.
+;   VSYNC is active during hardware character row 24. The program synchronizes
+;   to its trailing edge at the start of row 25, skips 24 complete scanlines
+;   (character rows 25 and 0), then captures 288 lines covering hardware rows
+;   1 through 24: the visible 80 x 24 character area. Every captured line is
+;   independently anchored to its HSYNC edge, preventing phase error from
+;   accumulating.
 
 .program p2000m_capture
 
 .wrap_target
-    ; Synchronize to the leading edge of a new active-low vertical sync pulse.
-    wait 1 pin 2                   ; VSYNC idle
-    wait 0 pin 2                   ; VSYNC asserted: frame line 0
+    ; Synchronize to the trailing edge of an active-low vertical sync pulse.
+    ; VSYNC spans row 24, so its trailing edge identifies the start of row 25.
+    wait 0 pin 2                   ; VSYNC asserted during hardware row 24
+    wait 1 pin 2                   ; VSYNC idle: hardware row 25 starts
     pull block                     ; Receive visible-line loop count from DMA
     mov y, osr                     ; y = 287: capture 288 visible lines
 

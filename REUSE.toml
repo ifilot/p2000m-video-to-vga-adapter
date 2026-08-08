@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+# SPDX-License-Identifier: CC-BY-4.0
+
+version = 1
+SPDX-PackageName = "P2000M VID2VGA adapter"
+SPDX-PackageSupplier = "Ivo Filot <ivo@ivofilot.nl>"
+SPDX-PackageDownloadLocation = "https://github.com/ifilot/p2000m-video-to-vga-adapter"
+
+[[annotations]]
+path = [
+    "pcb/components/**/*.kicad_mod",
+    "pcb/fabrication-toolkit-options.json",
+    "pcb/fp-lib-table",
+    "pcb/p2000m-to-vga-adapter.kicad_pcb",
+    "pcb/p2000m-to-vga-adapter.kicad_pro",
+    "pcb/p2000m-to-vga-adapter.kicad_sch",
+    "pcb/p2000m-to-vga-adapter.pdf",
+    "images/**",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Ivo Filot <ivo@ivofilot.nl>"
+SPDX-License-Identifier = "CERN-OHL-S-2.0"
+
+[[annotations]]
+path = ["screentest/screentest.bin"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Ivo Filot <ivo@ivofilot.nl>"
+SPDX-License-Identifier = "GPL-3.0-or-later"

@@ -1,11 +1,18 @@
+<!--
+SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+SPDX-License-Identifier: CC-BY-4.0
+-->
+
 # P2000M VID2VGA adapter
 
 [![Firmware](https://github.com/ifilot/p2000m-video-to-vga-adapter/actions/workflows/firmware.yml/badge.svg)](https://github.com/ifilot/p2000m-video-to-vga-adapter/actions/workflows/firmware.yml)
 
+![Philips P2000M connected to a monitor through the VID2VGA adapter](images/p2000m-vga-hero.jpg)
+
 This repository contains the adapter PCB and Raspberry Pi Pico 2 firmware for
 converting the Philips P2000M raw monochrome video output to VGA.
 
-Firmware version **v0.1.0** captures the conditioned P2000M signals on GPIO16-18,
+The adapter captures the conditioned P2000M signals on GPIO16-18,
 recovers the source dot grid in software, and presents a tear-free 640 x 288
 source image in a 640 x 480, 60 Hz VGA raster. The asynchronous 50.095 Hz
 source is repeated as needed at VGA frame boundaries.
@@ -15,6 +22,22 @@ and bottom margins. An optional fit mode expands them to all 480 VGA lines using
 symmetric nearest-neighbour 5:3 scaling. Each three-line source group becomes
 five output lines in a 2,1,2 repetition pattern, preserving hard text edges
 without introducing gray interpolation pixels.
+
+## Hardware
+
+The adapter conditions the P2000M video and synchronization signals for the
+Pico 2, then converts the Pico's 12-bit RGB output and synchronization signals
+to a standard VGA connection.
+
+[![3D rendering of the assembled P2000M VID2VGA adapter PCB](images/p2000m-to-vga-adapter.png)](images/p2000m-to-vga-adapter.png)
+
+*3D rendering of the assembled adapter. The board design is in
+[`pcb/p2000m-to-vga-adapter.kicad_pcb`](pcb/p2000m-to-vga-adapter.kicad_pcb).*
+
+[![Circuit schematic for the P2000M VID2VGA adapter](images/p2000m-to-vga-adapter-schematic.png)](pcb/p2000m-to-vga-adapter.pdf)
+
+*Circuit schematic. Select the image to open the PDF; the editable source is
+[`pcb/p2000m-to-vga-adapter.kicad_sch`](pcb/p2000m-to-vga-adapter.kicad_sch).*
 
 ## Building
 
@@ -52,26 +75,115 @@ Flash the single generated image:
 build/src/p2000m-vid2vga-firmware.uf2
 ```
 
-## Capture and resampling
+## Video capture and VGA conversion
 
-The PCB's Schmitt trigger inverts the source, so a cleared captured bit means
-foreground and a set bit means background. PIO1 samples VIDEO uniformly at
-63 MHz and anchors each line independently to HSYNC. Each packed word contains
-28 useful samples and represents 30 PIO ticks; the software model explicitly
-accounts for the two loop-branch gaps.
+The P2000M connector does not carry a VGA-compatible raster. It exposes a
+one-bit monochrome `VIDEO` signal plus separate `HSYNC` and `VSYNC` timing
+signals. The adapter first converts those signals to safe 3.3 V logic, then the
+Pico measures and reconstructs the original dot grid before generating a new,
+independent VGA raster. The complete path is:
 
-Three raw buffers decouple continuous DMA capture from software. The resampler
-derives the horizontal dot period from the measured frame period, searches five
-candidate phases, and decodes each output pixel from an early/centre/late
-three-sample window. A double-buffered map allows automatic tuning updates
-without mixing mappings inside a decoded frame.
+```text
+P2000M DIN-5 -> protection and Schmitt-trigger conditioning
+             -> PIO sampling and DMA raw-frame buffers
+             -> 640 x 288 one-bit reconstructed frames
+             -> color mapping and 640 x 480 VGA scanout
+```
 
-Core 0 converts the newest raw frame into one-bit pixels. Three decoded buffers
-ensure that one complete pending frame remains available while another is being
-displayed and the third is filled. Core 1 changes decoded-frame ownership only
-at the start of a VGA frame, preventing tearing and handoff starvation. All 640
-source pixels are output; an additional black pixel in the front porch returns
-the RGB DAC to black before synchronization.
+### P2000M source timing
+
+The P2000M derives its display timing from a 12 MHz dot clock. Eight dots form
+one character time and 96 character times form one 64 microsecond scanline.
+Only 80 character times contain picture data, giving 640 visible dots per line.
+Twelve scanlines form a character row and 26 hardware rows form a frame, for a
+nominal frame rate of approximately 50.1 Hz.
+
+The 24 rows stored in video memory do not have the same numbers as the hardware
+timing rows. Video-memory rows 0 through 23 appear in hardware rows 1 through
+24. Hardware rows 25 and 0 are part of the vertical blanking and preparation
+interval. `VSYNC` is active during hardware row 24, the final visible row:
+
+```text
+hardware row 24  video-memory row 23; VSYNC active
+hardware row 25  vertical blanking                     } skipped
+hardware row 0   vertical blanking / row preparation   } skipped
+hardware row 1   video-memory row 0; capture starts
+       ...
+hardware row 24  video-memory row 23; capture ends
+```
+
+The capture state machine waits for the trailing edge of the active-low
+conditioned `VSYNC`, which marks the start of hardware row 25. It then counts 24
+`HSYNC` edges to skip hardware rows 25 and 0. Capturing the following 288
+scanlines therefore covers hardware rows 1 through 24, or exactly 80 x 24
+characters. This distinction is important: treating the assertion of `VSYNC`
+as row 0 would capture one blank character row and omit video-memory row 23.
+
+### Probing and input conditioning
+
+The three P2000M signals enter through the DIN-5 connector. Each input has a
+1 kΩ series resistor to limit transient current and a BAT54A clamp for negative
+undershoot. A 3.3 V-powered 74LVC1G14 Schmitt-trigger inverter translates the
+5 V-class input to RP2350 logic levels, cleans up slow or noisy edges, and
+inverts its polarity before it reaches the Pico:
+
+| P2000M signal | Conditioned signal | Pico input | Purpose |
+| --- | --- | --- | --- |
+| `VIDEO` | `~VIDEO_IN` | GPIO16 | Monochrome dot level |
+| `HSYNC` | `~HSYNC_IN` | GPIO17 | Start reference for every scanline |
+| `VSYNC` | `~VSYNC_IN` | GPIO18 | Frame and hardware-row reference |
+
+All three conditioned inputs are consequently active-low. For `VIDEO`, a low
+sample represents foreground and a high sample represents background.
+
+### Line capture and pixel reconstruction
+
+PIO1 runs at 63 MHz and anchors every captured line independently to the
+leading edge of conditioned `HSYNC`. After a fixed delay to just before the
+active picture, it oversamples `VIDEO` for 54.286 microseconds. Independent
+line synchronization prevents small timing errors from accumulating vertically.
+
+The PIO loop takes 14 consecutive samples followed by one branch cycle without
+a sample. Two loops are packed into each DMA word, so a word holds 28 useful
+samples representing 30 PIO clock ticks. A line contains 114 words and a raw
+frame contains 288 such lines. DMA writes complete frames into three buffers so
+capture can continue while software reads an older completed frame.
+
+The source clock is not phase-locked to the Pico. The firmware therefore
+measures the source frame period, divides it over the known 312 scanlines and
+768 dot periods per line, and builds a map from each of the 640 output pixels to
+the appropriate raw samples. It tests five nearby horizontal phases and selects
+the phase with the strongest foreground content. For each reconstructed pixel,
+three adjacent samples are examined; if any is foreground, the output pixel is
+foreground. This preserves narrow character strokes without introducing gray
+interpolation pixels. A double-buffered map ensures that a timing adjustment
+cannot change partway through decoding a frame.
+
+Core 0 converts the newest completed raw capture into a packed 640 x 288 one-bit
+frame. Three decoded-frame buffers separate this work from VGA generation on
+core 1.
+
+### VGA presentation
+
+The Pico generates a standard 640 x 480 raster with a 25.2 MHz pixel clock and
+a nominal 60 Hz refresh rate. The P2000M and VGA rates are asynchronous, so core
+1 switches to the newest decoded source frame only at the beginning of a VGA
+frame. If no newer P2000M frame is ready, it repeats the current one. A VGA
+frame can therefore never contain parts of two source frames.
+
+Horizontally, all 640 reconstructed source pixels map directly to the 640 VGA
+pixels. Vertically, native mode presents all 288 source lines one-to-one between
+96-line top and bottom margins. Fit mode expands them to 480 lines with
+symmetric nearest-neighbour 5:3 scaling: each three-line source group becomes a
+2,1,2 pattern of repeated VGA lines.
+
+The one-bit image selects the configured foreground or background color. The
+optional border is added during scanout, so it can use an independent color and
+a solid or dotted pattern without expanding the one-bit frame buffers. GPIO0
+through GPIO11 carry four bits each of red, green, and blue through the resistor
+DAC, while GPIO12 and GPIO13 generate VGA synchronization. After every 640-pixel
+picture line, the scanout emits black before horizontal blanking so the analog
+RGB outputs return to a defined level before synchronization.
 
 ## USB controls
 
@@ -82,20 +194,28 @@ unsolicited statistics.
 
 - `status` or `s`: print capture, decoder, resampler, and VGA statistics.
 - `version` or `v`: print the semantic firmware version.
+- `license`: print the firmware copyright, license, warranty, and source
+  location.
 - `log`: stream those statistics every two seconds. Press Enter, Escape, or
   `q` to stop the stream and return to the command prompt.
 - `settings`: print all active settings and whether they are factory defaults,
   modified in RAM, or saved in flash.
 - `border on`, `border off`, or `border toggle`: control a one-pixel rectangle
-  around the 640 x 288 source image. It uses the foreground color.
+  around the 640 x 288 source image.
+- `border-color <color>`: set the border color independently of the foreground
+  and background colors.
+- `border-style solid` or `border-style dotted`: select a continuous border or
+  a two-pixel-on, two-pixel-off pattern whose gaps reveal the source image.
 - `scale fit`: expand 288 source lines to the full 480-line VGA height.
 - `scale native`: show the original 288 lines between 96-line margins.
 - `fg <color>`: set the foreground/text color.
 - `bg <color>`: set the background color, including the top and bottom margins.
 - `colors`: list the named presets.
-- `defaults`: restore white on black, border off, and native 1:1 scaling.
-- `save`: explicitly save the current colors, border, scaling mode, and manual
-  phase trim. These settings are restored after reset or power cycling.
+- `defaults`: restore white on black, a disabled solid magenta (`#FF00FF`)
+  border, and native 1:1 scaling.
+- `save`: explicitly save the current colors, border state, border pattern,
+  scaling mode, and manual phase trim. These settings are restored after reset
+  or power cycling.
 - `factory-reset`: erase the saved configuration and immediately restore the
   factory display style and zero manual phase trim.
 - `tune` or `j`: run automatic phase tuning and print all candidate scores.
@@ -118,3 +238,20 @@ signal; only the user's manual phase trim is persistent.
 Automatic tuning runs about once every five seconds. The `stale_replaced`
 counter normally increases when newer raw frames supersede frames that no
 consumer needed; it is not itself a capture failure.
+
+## Licensing
+
+This is a multi-license project:
+
+- The firmware, build configuration, CI workflow, and P2000M screen-test
+  program are licensed under the
+  [GNU GPL version 3 or later](LICENSES/GPL-3.0-or-later.txt).
+- The PCB, schematic, custom footprints, and generated hardware views are
+  licensed under the
+  [CERN Open Hardware Licence Version 2—Strongly Reciprocal](LICENSES/CERN-OHL-S-2.0.txt).
+- This README and the changelog are licensed under
+  [Creative Commons Attribution 4.0](LICENSES/CC-BY-4.0.txt).
+
+See [LICENSE.md](LICENSE.md) for the exact file scopes and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for components incorporated
+from the Raspberry Pi Pico SDK, `pico-extras`, and TinyUSB.

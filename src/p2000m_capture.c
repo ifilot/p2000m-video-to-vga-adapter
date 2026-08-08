@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 /**
  * @file p2000m_capture.c
  * @brief PIO/DMA acquisition and line-locked software resampling for P2000M.
