@@ -63,8 +63,9 @@ and releases use [Semantic Versioning](https://semver.org/).
 ### Added
 
 - A buildable P2000M screen-test cartridge with row and column rulers, a
-  scrolling title, an elapsed-time display, and automatic cartridge-header
-  signing and checksum generation.
+  scrolling title, an elapsed-time display, a Space-selectable Matrix-style
+  character-rain mode, and automatic cartridge-header signing and checksum
+  generation.
 - Four M3 mounting holes to the schematic and PCB design, together with updated
   board and schematic renders.
 - Explicit per-file licensing, third-party notices, and SPDX metadata for the
