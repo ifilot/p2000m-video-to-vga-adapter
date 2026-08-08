@@ -16,6 +16,11 @@ and releases use [Semantic Versioning](https://semver.org/).
 - Corrected the Qt Installer Framework component identifier so the Windows
   installer can load its shortcut-creation script and proceed past Welcome.
 
+### Changed
+
+- Cached each platform's verified FFmpeg/x264 runtime in CI, while retaining
+  source-archive checksum checks and a real MP4 encoding test on every run.
+
 ## [0.3.0] - 2026-08-08
 
 ### Added

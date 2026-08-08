@@ -58,6 +58,13 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v6
 
+      - name: Restore verified FFmpeg runtime
+        id: ffmpeg-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ffmpeg-runtime
+          key: ffmpeg-runtime-v1-${{ matrix.package_arch }}-${{ hashFiles('gui/packaging/ffmpeg.env', 'gui/packaging/build_ffmpeg.sh', 'gui/packaging/verify_ffmpeg_runtime.sh') }}
+
       - name: Install Linux packaging dependencies
         if: matrix.platform == 'linux'
         shell: bash
@@ -74,7 +81,9 @@ jobs:
             xvfb
 
       - name: Install Windows FFmpeg build dependencies
-        if: matrix.platform == 'windows'
+        if: >-
+          matrix.platform == 'windows' &&
+          steps.ffmpeg-cache.outputs.cache-hit != 'true'
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -89,7 +98,9 @@ jobs:
             mingw-w64-ucrt-x86_64-pkgconf
 
       - name: Install macOS FFmpeg build dependencies
-        if: matrix.platform == 'macos'
+        if: >-
+          matrix.platform == 'macos' &&
+          steps.ffmpeg-cache.outputs.cache-hit != 'true'
         shell: bash
         run: brew install nasm pkg-config
 
@@ -102,18 +113,36 @@ jobs:
           cache: true
 
       - name: Build and verify bundled FFmpeg on Windows
-        if: matrix.platform == 'windows'
+        if: >-
+          matrix.platform == 'windows' &&
+          steps.ffmpeg-cache.outputs.cache-hit != 'true'
         shell: msys2 {0}
         run: |
           sh gui/packaging/build_ffmpeg.sh \
             "$PWD/ffmpeg-runtime" "$PWD/.ci-ffmpeg-work"
 
       - name: Build and verify bundled FFmpeg on Unix
-        if: matrix.platform != 'windows'
+        if: >-
+          matrix.platform != 'windows' &&
+          steps.ffmpeg-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           sh gui/packaging/build_ffmpeg.sh \
             "$PWD/ffmpeg-runtime" "$PWD/.ci-ffmpeg-work"
+
+      - name: Verify restored FFmpeg runtime
+        if: steps.ffmpeg-cache.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          sh gui/packaging/verify_ffmpeg_runtime.sh \
+            "$PWD/ffmpeg-runtime" "$PWD/.ci-ffmpeg-cache-verification"
+
+      - name: Save verified FFmpeg runtime
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ffmpeg-runtime
+          key: ${{ steps.ffmpeg-cache.outputs.cache-primary-key }}
 
       - name: Generate macOS icon
         if: matrix.platform == 'macos'

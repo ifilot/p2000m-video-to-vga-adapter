@@ -186,16 +186,7 @@ cp "$x264_archive" "$output_directory/source/"
     "$packaged_binary" -version
 } > "$output_directory/BUILD_INFO.txt"
 
-# Exercise exactly the demuxer, decoder, filter, encoder, muxer, and protocols
-# that the viewer uses. This also prevents an over-aggressive minimal build
-# from producing a package that starts but cannot record.
-frame="$work_directory/smoke-frame.bgra"
-recording="$work_directory/smoke-recording.mp4"
-dd if=/dev/zero of="$frame" bs=1228800 count=1 2>/dev/null
-"$packaged_binary" -hide_banner -loglevel error -nostdin -y \
-    -f rawvideo -pixel_format bgra -video_size 640x480 -framerate 25.047 \
-    -i "$frame" -frames:v 1 -an -c:v libx264 -preset veryfast -crf 18 \
-    -pix_fmt yuv420p -movflags +faststart "$recording"
-test -s "$recording"
+sh "$script_directory/verify_ffmpeg_runtime.sh" \
+    "$output_directory" "$work_directory/verification"
 
-echo "Built and verified FFmpeg $FFMPEG_VERSION with x264 $X264_REVISION."
+echo "Built FFmpeg $FFMPEG_VERSION with x264 $X264_REVISION."
