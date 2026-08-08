@@ -10,6 +10,7 @@ import argparse
 from pathlib import Path
 
 
+# P2000 cartridge geometry and header validation constants.
 ROM_SIZE = 0x4000
 BANK_SIZE = 0x2000
 HEADER_SIZE = 5
@@ -46,6 +47,7 @@ def sign_cartridge(image: bytes) -> tuple[bytes, int, int]:
 
 
 def main() -> None:
+    """Parse command-line paths, sign the image, and report header values."""
     parser = argparse.ArgumentParser(
         description="Sign the first 8 KiB bank of a P2000 cartridge image."
     )

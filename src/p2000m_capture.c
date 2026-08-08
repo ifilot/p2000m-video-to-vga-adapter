@@ -21,8 +21,10 @@
 #include "pico/stdlib.h"
 
 enum {
-    /** Clock required for exact 63 MHz PIO sampling and 25.2 MHz VGA. */
-    REQUIRED_SYSTEM_CLOCK_HZ = 126000000,
+    /** Experimental clock retaining exact 63 MHz capture and 25.2 MHz VGA. */
+    REQUIRED_SYSTEM_CLOCK_HZ = 252000000,
+    /** Integer PIO divisor retaining the original 63 MHz sampling clock. */
+    CAPTURE_CLOCK_DIVIDER = 4,
 
     /** Conditioned, active-low monochrome video input. */
     VIDEO_PIN = 16,
@@ -52,6 +54,12 @@ enum {
     TUNING_INITIAL_PHASE_TICK = 14,
     /** Nominal 64 microsecond line at the 63 MHz capture clock. */
     NOMINAL_LINE_TICKS = 4032,
+    /** Earliest credible P2000M VSYNC-to-VSYNC period. */
+    MINIMUM_FRAME_PERIOD_US = 19000,
+    /** Latest credible P2000M VSYNC-to-VSYNC period. */
+    MAXIMUM_FRAME_PERIOD_US = 21000,
+    /** Missing-frame interval after which the input is considered lost. */
+    SIGNAL_LOSS_TIMEOUT_US = 100000,
     /** Complete P2000M horizontal period expressed in source dot periods. */
     SOURCE_DOTS_PER_LINE = 768,
     /** Early and late samples taken around every mapped pixel center. */
@@ -76,9 +84,9 @@ _Static_assert(P2000M_CAPTURE_TICKS_PER_WORD == 30,
                "PIO timing assumes two branch cycles per packed word");
 _Static_assert(P2000M_CAPTURE_WORDS_PER_LINE * 2 == LINE_SAMPLE_GROUP_COUNT,
                "Each FIFO word must contain two sample groups");
-_Static_assert(REQUIRED_SYSTEM_CLOCK_HZ / 2u ==
+_Static_assert(REQUIRED_SYSTEM_CLOCK_HZ / CAPTURE_CLOCK_DIVIDER ==
                    P2000M_CAPTURE_SAMPLE_CLOCK_HZ,
-               "Capture PIO must use an integer divide-by-two clock");
+               "Capture PIO must retain the exact 63 MHz clock");
 
 /** PIO block reserved for input capture; scanvideo uses PIO0. */
 static PIO capture_pio = pio1;
@@ -133,6 +141,23 @@ static int32_t auto_phase_ticks = TUNING_INITIAL_PHASE_TICK;
 static int32_t manual_phase_ticks;
 /** Index of the pixel map visible to consumers. */
 static unsigned active_pixel_map;
+
+/**
+ * @brief Evaluate sync lock from one consistent capture-timing snapshot.
+ *
+ * @param now Current monotonic time in microseconds.
+ * @param last_frame_time Completion time of the latest captured frame.
+ * @param frame_period Latest measured frame period in microseconds.
+ * @return true when recent complete frames have credible source timing.
+ */
+static bool capture_timing_is_locked(uint64_t now,
+                                     uint64_t last_frame_time,
+                                     uint32_t frame_period) {
+    return last_frame_time != 0u &&
+        frame_period >= MINIMUM_FRAME_PERIOD_US &&
+        frame_period <= MAXIMUM_FRAME_PERIOD_US &&
+        now - last_frame_time <= SIGNAL_LOSS_TIMEOUT_US;
+}
 
 /** Packed-word address and bit mask corresponding to one PIO capture cycle. */
 typedef struct {
@@ -387,7 +412,7 @@ static void initialize_capture_pio(void) {
     // bits are ignored; two fourteen-sample groups make every FIFO word.
     sm_config_set_in_shift(&config, false, true,
                            P2000M_CAPTURE_SAMPLES_PER_WORD);
-    sm_config_set_clkdiv_int_frac8(&config, 2, 0);  // 126 MHz / 2 = 63 MHz
+    sm_config_set_clkdiv_int_frac8(&config, CAPTURE_CLOCK_DIVIDER, 0);
 
     pio_sm_set_consecutive_pindirs(capture_pio, capture_sm, VIDEO_PIN, 3, false);
     pio_sm_init(capture_pio, capture_sm, capture_program_offset, &config);
@@ -578,7 +603,8 @@ bool p2000m_capture_autotune(p2000m_capture_tuning_report_t *report) {
     const uint32_t previous_filtered_period = filtered_frame_period_us_q8;
     spin_unlock(buffer_lock, saved);
 
-    if (period_us < 19000u || period_us > 21000u) {
+    if (period_us < MINIMUM_FRAME_PERIOD_US ||
+        period_us > MAXIMUM_FRAME_PERIOD_US) {
         p2000m_capture_release_frame((unsigned)buffer_index);
         return false;
     }
@@ -674,6 +700,20 @@ bool p2000m_capture_autotune(p2000m_capture_tuning_report_t *report) {
 }
 
 /**
+ * @brief Check whether complete, correctly timed input frames remain recent.
+ *
+ * @return true while both synchronization inputs sustain frame capture.
+ */
+bool p2000m_capture_signal_present(void) {
+    const uint32_t saved = spin_lock_blocking(buffer_lock);
+    const uint64_t now = time_us_64();
+    const bool present = capture_timing_is_locked(
+        now, last_frame_time_us, last_frame_period_us);
+    spin_unlock(buffer_lock, saved);
+    return present;
+}
+
+/**
  * @brief Decode one resampled pixel from a complete raw frame.
  *
  * @param frame Start of a complete packed capture buffer.
@@ -697,6 +737,7 @@ bool p2000m_capture_pixel_is_white(const uint32_t *frame,
  */
 void p2000m_capture_get_stats(p2000m_capture_stats_t *stats) {
     const uint32_t saved = spin_lock_blocking(buffer_lock);
+    const uint64_t now = time_us_64();
     stats->captured_frames = captured_frames;
     stats->stale_frames_replaced = stale_frames_replaced;
     stats->last_frame_period_us = last_frame_period_us;
@@ -707,5 +748,7 @@ void p2000m_capture_get_stats(p2000m_capture_stats_t *stats) {
     stats->maximum_autotune_us = maximum_autotune_us;
     stats->auto_phase_ticks = auto_phase_ticks;
     stats->manual_phase_ticks = manual_phase_ticks;
+    stats->signal_present = capture_timing_is_locked(
+        now, last_frame_time_us, last_frame_period_us);
     spin_unlock(buffer_lock, saved);
 }

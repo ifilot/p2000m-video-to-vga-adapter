@@ -1,0 +1,255 @@
+# SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: GUI packages
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gui-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QT_VERSION: "6.8.3"
+  LINUXDEPLOY_VERSION: "1-alpha-20251107-1"
+  LINUXDEPLOY_QT_VERSION: "1-alpha-20250213-1"
+
+jobs:
+  package:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x86-64
+            os: windows-2022
+            platform: windows
+            qt_arch: win64_msvc2022_64
+            package_arch: windows-x86_64
+          - name: Linux x86-64
+            os: ubuntu-22.04
+            platform: linux
+            qt_arch: linux_gcc_64
+            package_arch: linux-x86_64
+          - name: macOS Intel
+            os: macos-15-intel
+            platform: macos
+            qt_arch: clang_64
+            package_arch: macos-x86_64
+            osx_arch: x86_64
+          - name: macOS Apple silicon
+            os: macos-15
+            platform: macos
+            qt_arch: clang_64
+            package_arch: macos-arm64
+            osx_arch: arm64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install Linux packaging dependencies
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libfuse2 \
+            libgl1 \
+            libxcb-cursor0 \
+            nasm \
+            ninja-build \
+            pkg-config \
+            xauth \
+            xvfb
+
+      - name: Install Windows FFmpeg build dependencies
+        if: matrix.platform == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            curl
+            diffutils
+            make
+            tar
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-nasm
+            mingw-w64-ucrt-x86_64-pkgconf
+
+      - name: Install macOS FFmpeg build dependencies
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: brew install nasm pkg-config
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4.3.1
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: ${{ matrix.qt_arch }}
+          tools: tools_ifw
+          cache: true
+
+      - name: Build and verify bundled FFmpeg on Windows
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        run: |
+          sh gui/packaging/build_ffmpeg.sh \
+            "$PWD/ffmpeg-runtime" "$PWD/.ci-ffmpeg-work"
+
+      - name: Build and verify bundled FFmpeg on Unix
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          sh gui/packaging/build_ffmpeg.sh \
+            "$PWD/ffmpeg-runtime" "$PWD/.ci-ffmpeg-work"
+
+      - name: Generate macOS icon
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          sh gui/packaging/create_macos_icon.sh \
+            gui/assets/p2000m-vid2vga-viewer-icon.png \
+            "$RUNNER_TEMP/p2000m-vid2vga-viewer.icns"
+
+      - name: Configure viewer
+        shell: bash
+        run: |
+          args=(
+            -S gui
+            -B build-gui
+            -DCMAKE_BUILD_TYPE=Release
+          )
+          if [[ "${{ matrix.platform }}" == "windows" ]]; then
+            args+=(-A x64)
+          else
+            args+=(-G Ninja)
+          fi
+          if [[ "${{ matrix.platform }}" == "macos" ]]; then
+            args+=(
+              -DCMAKE_OSX_ARCHITECTURES=${{ matrix.osx_arch }}
+              -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
+              -DP2000M_MACOS_ICON="$RUNNER_TEMP/p2000m-vid2vga-viewer.icns"
+            )
+          fi
+          cmake "${args[@]}"
+
+      - name: Build viewer
+        run: cmake --build build-gui --parallel --config Release
+
+      - name: Test before packaging
+        run: ctest --test-dir build-gui -C Release --output-on-failure
+
+      - name: Install package tree
+        shell: bash
+        run: |
+          cmake --install build-gui --config Release --prefix "$PWD/stage"
+          sh gui/packaging/bundle_ffmpeg.sh \
+            "$PWD/ffmpeg-runtime" "$PWD/stage" "${{ matrix.platform }}"
+
+      - name: Package Windows installer and portable ZIP
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $version = (Get-Content build-gui/package-version.txt -Raw).Trim()
+          New-Item -ItemType Directory -Force dist | Out-Null
+          windeployqt --release --compiler-runtime --no-translations `
+            stage/p2000m-vid2vga-viewer.exe
+          & stage/tools/ffmpeg.exe -hide_banner -version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bundled FFmpeg failed its packaged-runtime check."
+          }
+          $archive = "dist/p2000m-vid2vga-viewer-$version-windows-x86_64.zip"
+          Compress-Archive -Path stage/* -DestinationPath $archive
+          if (-not (Test-Path $archive -PathType Leaf)) {
+            throw "Windows package was not created: $archive"
+          }
+          $installer = "dist/p2000m-vid2vga-viewer-$version-windows-x86_64-setup.exe"
+          & gui/packaging/create_windows_installer.ps1 `
+            -Stage stage -Version $version -Output $installer `
+            -WorkDirectory installer-work
+
+      - name: Package Linux AppImage
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          version="$(tr -d '\r\n' < build-gui/package-version.txt)"
+          mkdir -p dist AppDir/usr
+          cmake --install build-gui --prefix "$PWD/AppDir/usr"
+          sh gui/packaging/bundle_ffmpeg.sh \
+            "$PWD/ffmpeg-runtime" "$PWD/AppDir" linux
+          AppDir/usr/libexec/p2000m-vid2vga-viewer/ffmpeg \
+            -hide_banner -version
+          curl --fail --location --retry 3 \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/${LINUXDEPLOY_VERSION}/linuxdeploy-x86_64.AppImage" \
+            --output linuxdeploy
+          curl --fail --location --retry 3 \
+            "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/${LINUXDEPLOY_QT_VERSION}/linuxdeploy-plugin-qt-x86_64.AppImage" \
+            --output linuxdeploy-plugin-qt
+          echo "c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d  linuxdeploy" | sha256sum --check
+          echo "15106be885c1c48a021198e7e1e9a48ce9d02a86dd0a1848f00bdbf3c1c92724  linuxdeploy-plugin-qt" | sha256sum --check
+          chmod +x linuxdeploy linuxdeploy-plugin-qt
+          export QMAKE="$QT_ROOT_DIR/bin/qmake"
+          export PATH="$PWD:$PATH"
+          export VERSION="$version"
+          export OUTPUT="$PWD/dist/p2000m-vid2vga-viewer-$version-linux-x86_64.AppImage"
+          ./linuxdeploy --appdir AppDir \
+            --executable AppDir/usr/bin/p2000m-vid2vga-viewer \
+            --executable AppDir/usr/libexec/p2000m-vid2vga-viewer/ffmpeg \
+            --desktop-file gui/packaging/nl.ivofilot.p2000m-vid2vga-viewer.desktop \
+            --icon-file gui/assets/p2000m-vid2vga-viewer-icon.png \
+            --plugin qt \
+            --output appimage
+          test -s "$OUTPUT"
+          "$OUTPUT" --appimage-version
+          set +e
+          timeout 3s xvfb-run -a "$OUTPUT"
+          launch_status=$?
+          set -e
+          if [[ "$launch_status" -ne 124 ]]; then
+            echo "Packaged AppImage exited unexpectedly with $launch_status." >&2
+            exit 1
+          fi
+
+      - name: Package macOS disk image
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          version="$(tr -d '\r\n' < build-gui/package-version.txt)"
+          app="stage/P2000M VID2VGA Viewer.app"
+          test -d "$app"
+          ffmpeg="$app/Contents/Resources/tools/ffmpeg"
+          "$ffmpeg" -hide_banner -version
+          macdeployqt "$app" -always-overwrite -executable="$ffmpeg" -dmg
+          source_dmg="stage/P2000M VID2VGA Viewer.dmg"
+          if [[ ! -f "$source_dmg" ]]; then
+            source_dmg="P2000M VID2VGA Viewer.dmg"
+          fi
+          test -s "$source_dmg"
+          package="dist/p2000m-vid2vga-viewer-$version-${{ matrix.package_arch }}.dmg"
+          mkdir -p dist
+          mv "$source_dmg" "$package"
+          hdiutil verify "$package"
+          test -s "$package"
+
+      - name: Preserve tested default-branch package
+        if: >-
+          github.event_name == 'push' &&
+          github.ref_name == github.event.repository.default_branch
+        uses: actions/upload-artifact@v7
+        with:
+          name: gui-${{ github.sha }}-${{ matrix.package_arch }}
+          path: dist/p2000m-vid2vga-viewer-*
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[Desktop Entry]
+Type=Application
+Name=P2000M VID2VGA Viewer
+Comment=View and configure a P2000M VID2VGA adapter
+Exec=p2000m-vid2vga-viewer
+Icon=nl.ivofilot.p2000m-vid2vga-viewer
+Terminal=false
+Categories=Utility;System;
+Keywords=P2000M;Philips;VGA;video;capture;

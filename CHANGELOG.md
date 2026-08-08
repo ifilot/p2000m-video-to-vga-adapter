@@ -9,6 +9,71 @@ All notable changes to the P2000M VID2VGA firmware are documented here. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and releases use [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-08-08
+
+### Added
+
+- A synchronization watchdog that replaces a frozen source image with a
+  dedicated `SIGNAL LOST` VGA screen when HSYNC/VSYNC-driven capture stops and
+  restores live video after stable input timing returns; the screen identifies
+  the adapter, compiled firmware version, and synchronization inputs awaited.
+- A continuous, backpressure-safe binary USB screen mode which delivers
+  complete CRC-checked,
+  640 x 288 one-bit frames at up to half the P2000M source rate without taking
+  ownership away from VGA scanout.
+- A Qt 6 Windows viewer which discovers Pico CDC ports, verifies the VID2VGA
+  firmware, enters screen mode automatically, reproduces VGA colors and
+  geometry, and restores console mode when disconnected.
+- Adapter configuration, connection, and About menus in the Windows viewer,
+  including color pickers, border and scaling controls, phase trim, and
+  optional persistent saving through the existing USB console.
+- Smooth or sharp display filtering, pixel-perfect integer scaling, full-screen
+  presentation, and lossless framebuffer screenshots in the Windows viewer.
+- Lower-latency GUI processing to improve full-frame streaming throughput.
+- Backward-compatible viewer negotiation for older per-frame-credit firmware.
+- Independently recoverable PackBits screen records with automatic raw fallback,
+  expanded-data CRC validation, codec round-trip tests, and live compression
+  reporting in the viewer.
+- An explicitly experimental 252 MHz, 1.30 V RP2350 configuration which retains
+  exact 63 MHz capture and 25.2 MHz VGA clocks.
+- Raw streaming as the viewer default, live raw/PackBits selection, aggregated
+  PackBits USB writes, a faster table-driven framebuffer CRC, and end-to-end
+  USB/render/paint/firmware timing telemetry.
+- Visible viewer version information in the title, About dialog, Qt metadata,
+  and Windows executable properties.
+- A monitor-derived application icon for the Windows executable, taskbar,
+  viewer window, and dialogs.
+- A right-hand live performance panel with rolling history graphs for all
+  transport, frame, rendering, firmware timing, and integrity metrics.
+- FFmpeg-backed H.264 MP4 screen recording with bounded buffering, recording
+  controls, progress reporting, and safe finalization on disconnect or exit.
+- Mode-aware performance graphs which hide compression-only metrics in raw
+  mode, plus rolling CRC errors per minute and a cumulative status-bar count.
+- Native Linux and macOS USB CDC backends while preserving the established
+  Windows SetupAPI and direct-COM implementation.
+- Automated Windows ZIP, Linux AppImage, and Intel/Apple-silicon macOS DMG
+  builds on every default-branch push and pull request.
+- A graphical Windows offline installer with Start-menu and desktop shortcuts,
+  license presentation, and an uninstall/maintenance tool; the portable ZIP
+  remains available alongside it.
+- A pinned, package-private FFmpeg 8.1.2 and x264 H.264 recording runtime in
+  every desktop package, including verified corresponding source archives,
+  license texts, checksums, build configuration, and an encoding smoke test.
+- Exact-commit release promotion which refuses tags unless both firmware and
+  every desktop package were already tested successfully on `master`.
+
+### Changed
+
+- Standardized source comments around Doxygen documentation blocks and concise
+  implementation-rationale comments.
+- Reserved the viewer status bar for the COM port, source frame number,
+  cumulative CRC count, and operational recording messages instead of
+  detailed performance statistics.
+- Enabled Qt resource compilation so the application icon is available to
+  windows and the taskbar, and displayed it prominently in the About dialog.
+- Documented the cooling block used for sustained 252 MHz, 25 FPS operation and
+  recommended equivalent RP2350 cooling for prolonged overclocked use.
+
 ## [0.2.0] - 2026-08-08
 
 ### Added
@@ -70,5 +135,6 @@ and releases use [Semantic Versioning](https://semver.org/).
 - Pico 2/RP2350 project defaults and an early, actionable error when the Arm
   cross-compiler is not installed.
 
+[0.3.0]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ifilot/p2000m-video-to-vga-adapter/releases/tag/v0.1.0

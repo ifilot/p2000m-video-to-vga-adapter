@@ -1,0 +1,208 @@
+# SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Publish tested release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release:
+    name: Promote exact tested artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+
+      - name: Validate tag, component versions, and changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          firmware_version="$(sed -n \
+            's/^project(p2000m_vid2vga_firmware VERSION \([^ ]*\).*/\1/p' \
+            CMakeLists.txt)"
+          viewer_version="$(sed -n \
+            's/^project(p2000m_vid2vga_viewer VERSION \([^ ]*\).*/\1/p' \
+            gui/CMakeLists.txt)"
+          if [[ -z "$firmware_version" || -z "$viewer_version" ]]; then
+            echo "Could not determine firmware and viewer versions." >&2
+            exit 1
+          fi
+          if [[ "$firmware_version" != "$viewer_version" ]]; then
+            echo "Firmware v$firmware_version and viewer v$viewer_version differ." >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_NAME" != "v$firmware_version" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match project v$firmware_version." >&2
+            exit 1
+          fi
+          if ! grep -Fq "## [$firmware_version]" CHANGELOG.md; then
+            echo "CHANGELOG.md has no section for $firmware_version." >&2
+            exit 1
+          fi
+
+      - name: Find successful default-branch runs for this commit
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          find_run() {
+            workflow=$1
+            for attempt in {1..60}; do
+              runs="$(gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --workflow "$workflow" \
+                --commit "$GITHUB_SHA" \
+                --event push \
+                --limit 20 \
+                --json databaseId,headBranch,headSha,status,conclusion)"
+              successful="$(jq -r \
+                --arg sha "$GITHUB_SHA" \
+                --arg branch "$DEFAULT_BRANCH" \
+                '[.[] | select(
+                    .headSha == $sha and
+                    .headBranch == $branch and
+                    .conclusion == "success"
+                  )][0].databaseId // empty' <<<"$runs")"
+              if [[ -n "$successful" ]]; then
+                echo "$successful"
+                return 0
+              fi
+
+              active="$(jq -r \
+                --arg sha "$GITHUB_SHA" \
+                --arg branch "$DEFAULT_BRANCH" \
+                '[.[] | select(
+                    .headSha == $sha and
+                    .headBranch == $branch and
+                    .status != "completed"
+                  )][0].databaseId // empty' <<<"$runs")"
+              if [[ -n "$active" ]]; then
+                echo "Waiting for $workflow run $active..." >&2
+                gh run watch "$active" --repo "$GITHUB_REPOSITORY" \
+                  --interval 10 >&2 || true
+                continue
+              fi
+
+              failed="$(jq -r \
+                --arg sha "$GITHUB_SHA" \
+                --arg branch "$DEFAULT_BRANCH" \
+                '[.[] | select(
+                    .headSha == $sha and .headBranch == $branch
+                  )][0].databaseId // empty' <<<"$runs")"
+              if [[ -n "$failed" ]]; then
+                echo "$workflow failed for tagged commit $GITHUB_SHA; release refused." >&2
+                return 1
+              fi
+              echo "Waiting for $workflow CI to start ($attempt/60)..." >&2
+              sleep 10
+            done
+            echo "No $workflow run found for tagged commit $GITHUB_SHA." >&2
+            return 1
+          }
+
+          firmware_run="$(find_run firmware.yml)"
+          gui_run="$(find_run gui-packages.yml)"
+          echo "firmware_run=$firmware_run" >> "$GITHUB_OUTPUT"
+          echo "gui_run=$gui_run" >> "$GITHUB_OUTPUT"
+
+      - name: Download tested firmware
+        uses: actions/download-artifact@v7
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.ci.outputs.firmware_run }}
+          name: firmware-${{ github.sha }}
+          path: dist
+
+      - name: Download tested GUI packages
+        uses: actions/download-artifact@v7
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.ci.outputs.gui_run }}
+          pattern: gui-${{ github.sha }}-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify and publish exact tested assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          assets=(
+            "dist/p2000m-vid2vga-firmware-v${version}.uf2"
+            "dist/p2000m-vid2vga-viewer-${version}-windows-x86_64-setup.exe"
+            "dist/p2000m-vid2vga-viewer-${version}-windows-x86_64.zip"
+            "dist/p2000m-vid2vga-viewer-${version}-linux-x86_64.AppImage"
+            "dist/p2000m-vid2vga-viewer-${version}-macos-x86_64.dmg"
+            "dist/p2000m-vid2vga-viewer-${version}-macos-arm64.dmg"
+            dist/LICENSE.md
+            dist/LICENSE-GPL-3.0-or-later.txt
+            dist/LICENSE-LGPL-3.0-only.txt
+            dist/LICENSE-CERN-OHL-S-2.0.txt
+            dist/LICENSE-CC-BY-4.0.txt
+            dist/LICENSE-BSD-3-Clause.txt
+            dist/LICENSE-MIT.txt
+            dist/THIRD_PARTY_NOTICES.md
+          )
+          for asset in "${assets[@]}"; do
+            if [[ ! -s "$asset" ]]; then
+              echo "Missing tested release asset: $asset" >&2
+              exit 1
+            fi
+          done
+
+          awk -v heading="## [$version]" '
+            index($0, heading) == 1 { emit = 1 }
+            emit && /^## \[/ && index($0, heading) != 1 { exit }
+            emit { print }
+          ' CHANGELOG.md > release-notes.md
+          cat >> release-notes.md <<EOF
+
+          ### Desktop viewer packages
+
+          - Windows: unsigned graphical x86-64 installer and portable ZIP
+          - Linux: portable x86-64 AppImage
+          - macOS: unsigned Intel and Apple-silicon DMGs
+
+          Every desktop package contains the tested FFmpeg/x264 H.264 recording
+          runtime together with its exact corresponding source archives,
+          license texts, checksums, and build configuration. Linux users must
+          have access to the Pico serial device; distribution membership or a
+          udev rule may be required. Windows SmartScreen may request explicit
+          approval because the installer is not yet Authenticode-signed. The
+          macOS packages are currently not notarized, so Gatekeeper may require
+          an explicit first-launch approval.
+
+          Every attached binary was produced and tested by the successful
+          default-branch workflows for commit $GITHUB_SHA. The tag workflow
+          promotes those immutable artifacts and does not rebuild them.
+          EOF
+
+          if gh release view "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" \
+              --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$GITHUB_REF_NAME" \
+              --notes-file release-notes.md \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --verify-tag \
+              --title "P2000M VID2VGA $GITHUB_REF_NAME" \
+              --notes-file release-notes.md \
+              --repo "$GITHUB_REPOSITORY"
+          fi

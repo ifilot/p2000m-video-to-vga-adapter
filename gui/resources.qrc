@@ -1,0 +1,10 @@
+<!--
+SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+
+<RCC>
+    <qresource prefix="/icons">
+        <file alias="p2000m-vid2vga-viewer.png">assets/p2000m-vid2vga-viewer-icon.png</file>
+    </qresource>
+</RCC>
