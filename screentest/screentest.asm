@@ -138,8 +138,64 @@ clear_unused:
     inc hl
     djnz clear_unused
 
-halt:
-    jr halt
+    ; Draw an 18-character box on rows 10-12, centred in columns 31-48.
+    ld hl,box_top
+    ld de,0x533f
+    ld bc,box_top_end - box_top
+    ldir
+    ld hl,box_middle
+    ld de,0x538f
+    ld bc,box_middle_end - box_middle
+    ldir
+    ld hl,box_bottom
+    ld de,0x53df
+    ld bc,box_bottom_end - box_bottom
+    ldir
+
+    ; Animate a spinner in row 11, column 50, just to the right of the box.
+    ; Appendix D of the P2000 T&M System Reference Manual maps 0x5c to the
+    ; fraction 1/2, not backslash, so use only known P2000 glyphs here.
+    ld hl,0x53a2
+    ld de,spinner_frames
+
+spinner_loop:
+    ld a,(de)
+    cp 0xff
+    jr nz,spinner_ready
+    ld de,spinner_frames
+    ld a,(de)
+
+spinner_ready:
+    ld (hl),a
+    inc de
+
+    ; Busy-wait long enough for each frame to remain visible.  Video-memory
+    ; contention can vary the precise rate slightly on the real machine.
+    ld b,150
+
+delay_outer:
+    ld c,0
+
+delay_inner:
+    dec c
+    jr nz,delay_inner
+    djnz delay_outer
+    jr spinner_loop
+
+box_top:
+    db "+----------------+"
+box_top_end:
+
+box_middle:
+    db "| P2000M VID2VGA |"
+box_middle_end:
+
+box_bottom:
+    db "+----------------+"
+box_bottom_end:
+
+spinner_frames:
+    db '|', '/', '-', 0xff
 
     ; Emit a complete 16 KiB SLOT1 image; unused ROM bytes remain erased.
     defs 0x5000 - $, 0xff
