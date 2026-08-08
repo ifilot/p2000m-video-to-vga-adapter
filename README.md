@@ -7,7 +7,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 [![Firmware](https://github.com/ifilot/p2000m-video-to-vga-adapter/actions/workflows/firmware.yml/badge.svg)](https://github.com/ifilot/p2000m-video-to-vga-adapter/actions/workflows/firmware.yml)
 
-![Philips P2000M connected to a monitor through the VID2VGA adapter](images/p2000m-vga-hero.png)
+![Philips P2000M connected to a monitor through the VID2VGA adapter](images/p2000m-vga-hero.jpg)
 
 This repository contains the adapter PCB and Raspberry Pi Pico 2 firmware for
 converting the Philips P2000M raw monochrome video output to VGA.
