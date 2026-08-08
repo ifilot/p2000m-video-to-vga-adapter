@@ -31,6 +31,15 @@
 
 /** Semantic firmware version supplied by the top-level CMake project. */
 static const char firmware_version[] = "v" P2000M_VID2VGA_VERSION;
+/** Product label shown on the VGA signal-loss status card. */
+static const char signal_lost_product[] = "P2000M VID2VGA";
+/** Primary message shown when source synchronization has timed out. */
+static const char signal_lost_message[] = "SIGNAL LOST";
+/** Compile-time firmware identification shown without requiring USB. */
+static const char signal_lost_firmware[] =
+    "FIRMWARE v" P2000M_VID2VGA_VERSION;
+/** Synchronization inputs for which the capture engine is waiting. */
+static const char signal_lost_waiting[] = "WAITING FOR HSYNC + VSYNC";
 
 enum {
     /** Experimental 2x clock preserving exact capture and VGA divisors. */
@@ -85,6 +94,34 @@ enum {
     FLASH_LOCKOUT_TIMEOUT_MS = 1000,
     /** Core-start handshake value sent through the multicore FIFO. */
     VGA_READY_MAGIC = 0x56474131,
+    /** Width of each letter in the built-in signal-loss font. */
+    SIGNAL_LOST_GLYPH_WIDTH = 5,
+    /** Height of each letter in the built-in signal-loss font. */
+    SIGNAL_LOST_GLYPH_HEIGHT = 7,
+    /** Integer enlargement applied to the signal-loss message. */
+    SIGNAL_LOST_FONT_SCALE = 4,
+    /** Integer enlargement applied to signal-loss status details. */
+    SIGNAL_LOST_INFO_SCALE = 2,
+    /** Uppercase letters and digits stored in the status-card font. */
+    SIGNAL_LOST_FONT_GLYPHS = 36,
+    /** Left edge of the centered signal-loss panel. */
+    SIGNAL_LOST_PANEL_LEFT = 90,
+    /** Right edge, exclusive, of the centered signal-loss panel. */
+    SIGNAL_LOST_PANEL_RIGHT = 550,
+    /** Top edge of the centered signal-loss panel. */
+    SIGNAL_LOST_PANEL_TOP = 140,
+    /** Bottom edge, exclusive, of the centered signal-loss panel. */
+    SIGNAL_LOST_PANEL_BOTTOM = 340,
+    /** Thickness of the red panel outline. */
+    SIGNAL_LOST_PANEL_BORDER = 3,
+    /** Top edge of the product-name line. */
+    SIGNAL_LOST_PRODUCT_TOP = 164,
+    /** Top edge of the primary warning line. */
+    SIGNAL_LOST_MESSAGE_TOP = 200,
+    /** Top edge of the firmware-version line. */
+    SIGNAL_LOST_FIRMWARE_TOP = 254,
+    /** Top edge of the synchronization-wait line. */
+    SIGNAL_LOST_WAITING_TOP = 294,
 };
 
 _Static_assert((unsigned)VGA_WIDTH == (unsigned)P2000M_CAPTURE_WIDTH,
@@ -277,6 +314,8 @@ static unsigned displayed_style_index;
 static int displayed_buffer = -1;
 /** Source capture sequence currently being presented. */
 static uint32_t displayed_sequence;
+/** Input-lock state sampled by core 1 at the current VGA frame boundary. */
+static bool displayed_signal_present;
 
 /** Lifetime VGA frame counter, written by core 1. */
 static volatile uint32_t generated_vga_frames;
@@ -838,6 +877,190 @@ static void render_solid_scanline(
     scanline_buffer->status = SCANLINE_OK;
 }
 
+/** Five-bit rows for uppercase letters A-Z followed by digits 0-9. */
+static const uint8_t signal_lost_font
+    [SIGNAL_LOST_FONT_GLYPHS][SIGNAL_LOST_GLYPH_HEIGHT] = {
+    {0x0eu, 0x11u, 0x11u, 0x1fu, 0x11u, 0x11u, 0x11u}, // A
+    {0x1eu, 0x11u, 0x11u, 0x1eu, 0x11u, 0x11u, 0x1eu}, // B
+    {0x0eu, 0x11u, 0x10u, 0x10u, 0x10u, 0x11u, 0x0eu}, // C
+    {0x1eu, 0x11u, 0x11u, 0x11u, 0x11u, 0x11u, 0x1eu}, // D
+    {0x1fu, 0x10u, 0x10u, 0x1eu, 0x10u, 0x10u, 0x1fu}, // E
+    {0x1fu, 0x10u, 0x10u, 0x1eu, 0x10u, 0x10u, 0x10u}, // F
+    {0x0eu, 0x11u, 0x10u, 0x17u, 0x11u, 0x11u, 0x0eu}, // G
+    {0x11u, 0x11u, 0x11u, 0x1fu, 0x11u, 0x11u, 0x11u}, // H
+    {0x1fu, 0x04u, 0x04u, 0x04u, 0x04u, 0x04u, 0x1fu}, // I
+    {0x07u, 0x02u, 0x02u, 0x02u, 0x12u, 0x12u, 0x0cu}, // J
+    {0x11u, 0x12u, 0x14u, 0x18u, 0x14u, 0x12u, 0x11u}, // K
+    {0x10u, 0x10u, 0x10u, 0x10u, 0x10u, 0x10u, 0x1fu}, // L
+    {0x11u, 0x1bu, 0x15u, 0x15u, 0x11u, 0x11u, 0x11u}, // M
+    {0x11u, 0x19u, 0x15u, 0x13u, 0x11u, 0x11u, 0x11u}, // N
+    {0x0eu, 0x11u, 0x11u, 0x11u, 0x11u, 0x11u, 0x0eu}, // O
+    {0x1eu, 0x11u, 0x11u, 0x1eu, 0x10u, 0x10u, 0x10u}, // P
+    {0x0eu, 0x11u, 0x11u, 0x11u, 0x15u, 0x12u, 0x0du}, // Q
+    {0x1eu, 0x11u, 0x11u, 0x1eu, 0x14u, 0x12u, 0x11u}, // R
+    {0x0eu, 0x10u, 0x10u, 0x0eu, 0x01u, 0x01u, 0x1eu}, // S
+    {0x1fu, 0x04u, 0x04u, 0x04u, 0x04u, 0x04u, 0x04u}, // T
+    {0x11u, 0x11u, 0x11u, 0x11u, 0x11u, 0x11u, 0x0eu}, // U
+    {0x11u, 0x11u, 0x11u, 0x11u, 0x11u, 0x0au, 0x04u}, // V
+    {0x11u, 0x11u, 0x11u, 0x15u, 0x15u, 0x1bu, 0x11u}, // W
+    {0x11u, 0x0au, 0x04u, 0x04u, 0x04u, 0x0au, 0x11u}, // X
+    {0x11u, 0x0au, 0x04u, 0x04u, 0x04u, 0x04u, 0x04u}, // Y
+    {0x1fu, 0x01u, 0x02u, 0x04u, 0x08u, 0x10u, 0x1fu}, // Z
+    {0x0eu, 0x11u, 0x13u, 0x15u, 0x19u, 0x11u, 0x0eu}, // 0
+    {0x04u, 0x0cu, 0x04u, 0x04u, 0x04u, 0x04u, 0x0eu}, // 1
+    {0x0eu, 0x11u, 0x01u, 0x02u, 0x04u, 0x08u, 0x1fu}, // 2
+    {0x1eu, 0x01u, 0x01u, 0x0eu, 0x01u, 0x01u, 0x1eu}, // 3
+    {0x02u, 0x06u, 0x0au, 0x12u, 0x1fu, 0x02u, 0x02u}, // 4
+    {0x1fu, 0x10u, 0x10u, 0x1eu, 0x01u, 0x01u, 0x1eu}, // 5
+    {0x0eu, 0x10u, 0x10u, 0x1eu, 0x11u, 0x11u, 0x0eu}, // 6
+    {0x1fu, 0x01u, 0x02u, 0x04u, 0x08u, 0x08u, 0x08u}, // 7
+    {0x0eu, 0x11u, 0x11u, 0x0eu, 0x11u, 0x11u, 0x0eu}, // 8
+    {0x0eu, 0x11u, 0x11u, 0x0fu, 0x01u, 0x01u, 0x0eu}, // 9
+};
+
+/**
+ * @brief Obtain one row from the compact status-card font.
+ *
+ * @param character ASCII letter, digit, space, period, plus, or minus.
+ * @param row Glyph row from zero through SIGNAL_LOST_GLYPH_HEIGHT - 1.
+ * @return Five-bit row pattern with the leftmost pixel in bit four.
+ */
+static uint8_t signal_lost_glyph_row(char character, unsigned row) {
+    if (character >= 'a' && character <= 'z') {
+        character = (char)(character - 'a' + 'A');
+    }
+    if (character >= 'A' && character <= 'Z') {
+        return signal_lost_font[(unsigned)(character - 'A')][row];
+    }
+    if (character >= '0' && character <= '9') {
+        return signal_lost_font[26u + (unsigned)(character - '0')][row];
+    }
+    if (character == '.') {
+        return row == 6u ? 0x04u : 0x00u;
+    }
+    if (character == '+') {
+        static const uint8_t plus[SIGNAL_LOST_GLYPH_HEIGHT] = {
+            0x00u, 0x04u, 0x04u, 0x1fu, 0x04u, 0x04u, 0x00u,
+        };
+        return plus[row];
+    }
+    if (character == '-') {
+        return row == 3u ? 0x1fu : 0x00u;
+    }
+    return 0x00u;
+}
+
+/**
+ * @brief Overlay one centered line of status text on a raw VGA scanline.
+ *
+ * @param tokens Raw composable-scanline token storage.
+ * @param y Current active VGA line.
+ * @param message Null-terminated message to draw.
+ * @param top Top VGA coordinate of the text line.
+ * @param scale Integer pixel enlargement applied to the 5 x 7 glyphs.
+ * @param color RGB444 scanvideo color for lit glyph pixels.
+ * @return Nothing.
+ */
+static void render_signal_lost_text(uint16_t *tokens, unsigned y,
+                                    const char *message, unsigned top,
+                                    unsigned scale, uint16_t color) {
+    if (y < top || y >= top + SIGNAL_LOST_GLYPH_HEIGHT * scale) {
+        return;
+    }
+
+    const size_t length = strlen(message);
+    if (length == 0u) {
+        return;
+    }
+    const unsigned text_width =
+        (unsigned)(((SIGNAL_LOST_GLYPH_WIDTH + 1u) * length - 1u) * scale);
+    const unsigned text_left = (VGA_WIDTH - text_width) / 2u;
+    const unsigned font_row = (y - top) / scale;
+
+    for (size_t character = 0u; character < length; ++character) {
+        const unsigned character_x = text_left +
+            (unsigned)character * (SIGNAL_LOST_GLYPH_WIDTH + 1u) * scale;
+        const uint8_t row =
+            signal_lost_glyph_row(message[character], font_row);
+        for (unsigned column = 0u;
+             column < SIGNAL_LOST_GLYPH_WIDTH; ++column) {
+            if ((row & (0x10u >> column)) == 0u) {
+                continue;
+            }
+            const unsigned pixel_x = character_x + column * scale;
+            for (unsigned offset = 0u; offset < scale; ++offset) {
+                tokens[pixel_x + offset + 2u] = color;
+            }
+        }
+    }
+}
+
+/**
+ * @brief Render the fixed warning shown while source synchronization is lost.
+ *
+ * The warning deliberately ignores user colors and geometry so a black user
+ * foreground/background combination cannot hide this operational state.
+ *
+ * @param scanline_buffer Scanvideo buffer that receives composable tokens.
+ * @param y Zero-based active VGA line from 0 through 479.
+ * @return Nothing.
+ */
+static void render_signal_lost_scanline(
+    scanvideo_scanline_buffer_t *scanline_buffer, unsigned y) {
+    const uint16_t canvas = rgb888_to_scanvideo(0x000000u);
+    const uint16_t panel = rgb888_to_scanvideo(0x182028u);
+    const uint16_t alert = rgb888_to_scanvideo(0xe03030u);
+    const uint16_t text = rgb888_to_scanvideo(0xffffffu);
+    const bool panel_line = y >= SIGNAL_LOST_PANEL_TOP &&
+                            y < SIGNAL_LOST_PANEL_BOTTOM;
+    const bool panel_horizontal_border = panel_line &&
+        (y < SIGNAL_LOST_PANEL_TOP + SIGNAL_LOST_PANEL_BORDER ||
+         y >= SIGNAL_LOST_PANEL_BOTTOM - SIGNAL_LOST_PANEL_BORDER);
+
+    uint16_t *tokens = (uint16_t *)scanline_buffer->data;
+    tokens[0] = COMPOSABLE_RAW_RUN;
+    tokens[1] = canvas;
+    tokens[2] = VGA_WIDTH - 3;
+    for (unsigned x = 1u; x < VGA_WIDTH; ++x) {
+        tokens[x + 2u] = canvas;
+    }
+
+    if (panel_line) {
+        const uint16_t fill = panel_horizontal_border ? alert : panel;
+        for (unsigned x = SIGNAL_LOST_PANEL_LEFT;
+             x < SIGNAL_LOST_PANEL_RIGHT; ++x) {
+            tokens[x + 2u] = fill;
+        }
+        if (!panel_horizontal_border) {
+            for (unsigned offset = 0u;
+                 offset < SIGNAL_LOST_PANEL_BORDER; ++offset) {
+                tokens[SIGNAL_LOST_PANEL_LEFT + offset + 2u] = alert;
+                tokens[SIGNAL_LOST_PANEL_RIGHT - offset + 1u] = alert;
+            }
+        }
+    }
+
+    render_signal_lost_text(tokens, y, signal_lost_product,
+                            SIGNAL_LOST_PRODUCT_TOP,
+                            SIGNAL_LOST_INFO_SCALE, text);
+    render_signal_lost_text(tokens, y, signal_lost_message,
+                            SIGNAL_LOST_MESSAGE_TOP,
+                            SIGNAL_LOST_FONT_SCALE, text);
+    render_signal_lost_text(tokens, y, signal_lost_firmware,
+                            SIGNAL_LOST_FIRMWARE_TOP,
+                            SIGNAL_LOST_INFO_SCALE, text);
+    render_signal_lost_text(tokens, y, signal_lost_waiting,
+                            SIGNAL_LOST_WAITING_TOP,
+                            SIGNAL_LOST_INFO_SCALE, text);
+
+    tokens[RAW_SCANLINE_TOKENS - 4] = COMPOSABLE_RAW_1P;
+    tokens[RAW_SCANLINE_TOKENS - 3] = 0x0000;
+    tokens[RAW_SCANLINE_TOKENS - 2] = COMPOSABLE_EOL_SKIP_ALIGN;
+    tokens[RAW_SCANLINE_TOKENS - 1] = 0;
+    scanline_buffer->data_used = RAW_SCANLINE_WORDS;
+    scanline_buffer->status = SCANLINE_OK;
+}
+
 /**
  * @brief Map one active VGA line to the corresponding source-video line.
  *
@@ -977,7 +1200,13 @@ static void __not_in_flash_func(render_scanline)(
             __atomic_load_n(&requested_style_index, __ATOMIC_ACQUIRE);
         __atomic_store_n(&applied_style_index, displayed_style_index,
                          __ATOMIC_RELEASE);
+        displayed_signal_present = p2000m_capture_signal_present();
         select_frame_for_next_vga_frame();
+    }
+
+    if (!displayed_signal_present) {
+        render_signal_lost_scanline(scanline_buffer, y);
+        return;
     }
 
     const display_style_t *style = &display_styles[displayed_style_index];
@@ -1075,8 +1304,6 @@ static void print_statistics(void) {
     }
 
     const uint32_t rate_millihz = 1000000000u / capture.last_frame_period_us;
-    const bool locked = capture.last_frame_period_us >= 19000u &&
-                        capture.last_frame_period_us <= 21000u;
     printf("VID2VGA capture_frames=%" PRIu32 " input_period_us=%" PRIu32
            " input_rate=%" PRIu32 ".%03" PRIu32
            "Hz locked=%s stale_replaced=%" PRIu32
@@ -1093,7 +1320,8 @@ static void print_statistics(void) {
            " tune_us=%" PRIu32 " tune_max_us=%" PRIu32 "\n",
            capture.captured_frames, capture.last_frame_period_us,
            rate_millihz / 1000u, rate_millihz % 1000u,
-           locked ? "yes" : "no", capture.stale_frames_replaced,
+           capture.signal_present ? "yes" : "no",
+           capture.stale_frames_replaced,
            vga_frames, swaps, repeats, blanks, sequence,
            decoded, decode_us, decode_max_us, screen_frames_sent,
            capture.recovered_line_ticks_q16 >> 16,

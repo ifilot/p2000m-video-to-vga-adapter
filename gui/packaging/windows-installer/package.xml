@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl> -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<Package>
+    <DisplayName>P2000M VID2VGA Viewer</DisplayName>
+    <Description>Live monitor, recorder, and configuration utility for the P2000M VID2VGA adapter. Includes the private FFmpeg recording runtime.</Description>
+    <Version>@VERSION@</Version>
+    <ReleaseDate>@RELEASE_DATE@</ReleaseDate>
+    <Name>nl.ivofilot.p2000m-vid2vga-viewer</Name>
+    <Licenses>
+        <License name="P2000M VID2VGA Viewer — GNU GPL v3 or later" file="LICENSE-GPL-3.0-or-later.txt" />
+        <License name="FFmpeg — GNU GPL v3 or later" file="FFMPEG-COPYING.GPLv3" />
+        <License name="x264 — GNU GPL v2 or later" file="X264-COPYING" />
+    </Licenses>
+    <Default>true</Default>
+    <ForcedInstallation>true</ForcedInstallation>
+    <RequiresAdminRights>true</RequiresAdminRights>
+    <Script>installscript.qs</Script>
+</Package>

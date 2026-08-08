@@ -5,21 +5,25 @@
 
 /**
  * @file main.cpp
- * @brief Qt 6 Windows viewer and USB-console frontend for P2000M VID2VGA.
+ * @brief Cross-platform Qt 6 viewer and USB console for P2000M VID2VGA.
  */
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
-#include <cwchar>
 #include <deque>
 #include <utility>
-#include <vector>
 
+#ifdef _WIN32
+#include <cwchar>
+#include <vector>
 #include <windows.h>
 #include <devguid.h>
 #include <setupapi.h>
+#else
+#include "adapter_serial_port.h"
+#endif
 
 #include <QApplication>
 #include <QAction>
@@ -63,8 +67,10 @@
 
 namespace {
 
+#ifdef _WIN32
 /** Raspberry Pi USB vendor identifier used to shortlist Pico CDC devices. */
 constexpr quint16 kPicoVendorId = 0x2e8a;
+#endif
 /** Bytes in the version-one binary screen-record header. */
 constexpr int kFrameHeaderSize = 48;
 /** Bytes in one unpacked 640 x 288 one-bit source framebuffer. */
@@ -188,6 +194,8 @@ bool parseDeviceSettings(const QByteArray &consoleText,
     settings->storage = match.captured(8);
     return true;
 }
+
+#ifdef _WIN32
 
 /**
  * Enumerate present Windows COM ports belonging to Raspberry Pi Pico devices.
@@ -413,6 +421,8 @@ private:
     /** User-facing COM-port name corresponding to handle_. */
     QString name_;
 };
+
+#endif
 
 /** Color-selection button that previews and returns one 24-bit RGB value. */
 class ColorButton final : public QPushButton {
@@ -982,8 +992,14 @@ private:
                     "<p>A live Qt 6 monitor and configuration utility for "
                     "the Raspberry Pi Pico 2 P2000M video adapter.</p>"
                     "<p>Copyright © 2026 Ivo Filot<br>"
-                    "Licensed under GNU GPL v3 or later.</p>")
-                    .arg(QStringLiteral(P2000M_VIEWER_VERSION)));
+                    "Licensed under GNU GPL v3 or later.</p>"
+                    "<p>Packaged distributions include FFmpeg %2 and x264 "
+                    "under their GNU GPL licenses. Exact source archives, "
+                    "license texts, checksums, and build configuration are "
+                    "provided in the <code>licenses/ffmpeg</code> directory."
+                    "</p>")
+                    .arg(QStringLiteral(P2000M_VIEWER_VERSION),
+                         QStringLiteral(P2000M_FFMPEG_VERSION)));
             about.exec();
         });
     }
@@ -1004,17 +1020,33 @@ private:
         }
     }
 
-    /** Locate FFmpeg beside the app, on PATH, or in standard MSYS2 prefixes. */
+    /** Locate the private packaged FFmpeg, then development fallbacks. */
     QString findFfmpegExecutable() const {
         const QDir applicationDirectory(
             QCoreApplication::applicationDirPath());
-        QStringList candidates = {
+        QStringList candidates;
+
+#ifdef _WIN32
+        candidates.append(applicationDirectory.filePath(
+            QStringLiteral("tools/ffmpeg.exe")));
+#elif defined(Q_OS_MACOS)
+        candidates.append(applicationDirectory.filePath(
+            QStringLiteral("../Resources/tools/ffmpeg")));
+#else
+        candidates.append(applicationDirectory.filePath(
+            QStringLiteral("../libexec/p2000m-vid2vga-viewer/ffmpeg")));
+#endif
+
+        // These fallbacks keep unpackaged developer builds convenient. A
+        // release package always supplies and selects the private tool first.
+        candidates.append({
             applicationDirectory.filePath(QStringLiteral("ffmpeg.exe")),
             applicationDirectory.filePath(QStringLiteral("ffmpeg")),
             QStandardPaths::findExecutable(QStringLiteral("ffmpeg.exe")),
             QStandardPaths::findExecutable(QStringLiteral("ffmpeg")),
-        };
+        });
 
+#ifdef _WIN32
         // Explorer-launched applications often do not inherit the MSYS2
         // shell PATH, so also check its active prefix and default locations.
         const auto appendPrefix = [&candidates](const QString &prefix) {
@@ -1029,6 +1061,15 @@ private:
             QStringLiteral("C:/msys64/ucrt64/bin/ffmpeg.exe"),
             QStringLiteral("C:/msys64/mingw64/bin/ffmpeg.exe"),
         });
+#elif defined(Q_OS_MACOS)
+        // Finder does not normally inherit Homebrew's shell PATH.
+        candidates.append({
+            QStringLiteral("/opt/homebrew/bin/ffmpeg"),
+            QStringLiteral("/usr/local/bin/ffmpeg"),
+        });
+#else
+        candidates.append(QStringLiteral("/usr/bin/ffmpeg"));
+#endif
         for (const QString &candidate : candidates) {
             if (!candidate.isEmpty() && QFileInfo::exists(candidate)) {
                 return QDir::toNativeSeparators(candidate);
@@ -1049,11 +1090,10 @@ private:
             QMessageBox::warning(
                 this, QStringLiteral("FFmpeg not found"),
                 QStringLiteral(
-                    "Recording requires ffmpeg.exe. Install the MSYS2 "
-                    "UCRT64 package mingw-w64-ucrt-x86_64-ffmpeg or the "
-                    "MinGW64 package mingw-w64-x86_64-ffmpeg, add FFmpeg "
-                    "to PATH, or place a complete FFmpeg distribution "
-                    "beside the viewer."));
+                    "The packaged FFmpeg recording runtime is missing or "
+                    "damaged. Reinstall the viewer from an official package. "
+                    "An unpackaged development build may instead use an "
+                    "FFmpeg installation on PATH."));
             return;
         }
 
@@ -2094,7 +2134,11 @@ private:
     /** Destination selected for the current or most recent recording. */
     QString recordingFile_;
     /** Native serial-port owner. */
+#ifdef _WIN32
     WindowsSerialPort serial_;
+#else
+    AdapterSerialPort serial_;
+#endif
     /** Pico CDC candidates found during the current discovery pass. */
     QStringList candidates_;
     /** Candidates which another application prevented us from opening. */

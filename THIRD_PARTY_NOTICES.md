@@ -18,6 +18,32 @@ The exact dependency source is available from:
 - <https://github.com/raspberrypi/pico-extras/tree/sdk-2.3.0>
 - <https://github.com/hathach/tinyusb/tree/86ad6e56c1700e85f1c5678607a762cfe3aa2f47>
 
+Release packages of the optional desktop viewer also contain dynamically
+linked Qt 6 runtime libraries and plugins. Those unmodified libraries retain
+their Qt Project licensing, including the GNU Lesser General Public License
+version 3 where applicable. Viewer packaging copies the license files supplied
+with the exact Qt distribution into the package. Qt source releases and the
+corresponding license information are available from <https://www.qt.io/>.
+
+Viewer packages include a private FFmpeg 8.1.2 executable built from unmodified
+FFmpeg source and statically linked with x264 revision
+`b35605ace3ddf7c1a5d67a2eb553f034aef41d55`. The executable is a separate
+process connected to the viewer through standard input. FFmpeg is configured
+with `--enable-gpl --enable-version3 --enable-libx264`, so the resulting
+runtime is distributed under GNU GPL version 3 or later. x264 is distributed
+under GNU GPL version 2 or later.
+
+Every viewer package contains the complete, exact FFmpeg and x264 source
+archives used for that platform build, their license texts, SHA-256 checksums,
+the full configure arguments, and the runtime's own version report under
+`licenses/ffmpeg`. The authoritative upstream locations are:
+
+- <https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz>
+- <https://code.videolan.org/videolan/x264/-/commit/b35605ace3ddf7c1a5d67a2eb553f034aef41d55>
+
+FFmpeg copyright © 2000–2026 the FFmpeg developers. x264 copyright © 2003–2025
+the x264 project. No endorsement by either project is implied.
+
 ## Raspberry Pi Pico SDK and pico-extras
 
 Copyright 2020 (c) 2020 Raspberry Pi (Trading) Ltd.

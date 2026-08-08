@@ -6,10 +6,10 @@ SPDX-License-Identifier: CC-BY-4.0
 # P2000M VID2VGA Viewer
 
 The Qt 6 viewer automatically enumerates Raspberry Pi Pico USB CDC ports on
-Windows, verifies the VID2VGA firmware, enters binary screen mode, and displays
-complete CRC-checked frames. Disconnecting or closing the application returns
-the adapter to its normal console mode. The application version is visible in
-the window title, **Help > About**, Qt application metadata, and the Windows
+Windows, Linux, and macOS, verifies the VID2VGA firmware, enters binary screen
+mode, and displays complete CRC-checked frames. Disconnecting or closing the
+application returns the adapter to its normal console mode. The application
+version is visible in the window title, **Help > About**, Qt application metadata, and the Windows
 executable properties.
 
 The viewer uses continuous streaming with current firmware to avoid a USB
@@ -47,27 +47,31 @@ widths, while **F11** enters a clean full-screen presentation and **Escape**
 leaves it. The monitor-derived application icon is used by the executable,
 main window, dialogs, and taskbar.
 
-The application deliberately uses the Windows communications API rather than
-Qt Serial Port. This keeps the only Qt dependency at `qt6-base`, which is part
-of a standard MSYS2 UCRT64/MinGW Qt installation.
+The application uses SetupAPI and direct COM access on Windows, preserving the
+high-throughput path tested with the adapter. Linux and macOS use a compact
+native POSIX serial backend. Qt Serial Port is therefore not required on any
+platform; the only Qt dependency is Qt 6 Base.
 
 Build from an MSYS2 UCRT64 shell:
 
 ```sh
-pacman -S --needed mingw-w64-ucrt-x86_64-qt6-base \
-  mingw-w64-ucrt-x86_64-ffmpeg
+pacman -S --needed mingw-w64-ucrt-x86_64-qt6-base
 cmake -S gui -B build-gui -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build-gui
 ```
 
-FFmpeg is optional and is not bundled with the viewer. **File > Start
-Recording** looks for `ffmpeg.exe` beside the viewer, on `PATH`, and in the
-standard MSYS2 UCRT64 and MinGW64 locations. The MSYS2 package above installs
-an FFmpeg build with the `libx264` encoder used by the viewer. In an MSYS2
-MinGW64 shell, install `mingw-w64-x86_64-ffmpeg` instead. Screenshots and
-normal live viewing do not require FFmpeg.
+Every distributed viewer package includes a private, smoke-tested FFmpeg/x264
+runtime for H.264 recording. The viewer selects that copy before considering a
+developer installation on `PATH`. Exact corresponding source archives,
+license texts, checksums, and configure arguments are included under
+`licenses/ffmpeg`; no separate FFmpeg installation is required.
 
-To create a directory containing the executable and its Qt runtime DLLs:
+See [PACKAGING.md](PACKAGING.md) for Linux and macOS builds, package formats,
+the default-branch package checks, and the exact-commit tag release process.
+
+The following creates a development directory containing the executable and
+its Qt runtime DLLs. It is not a distributable package until the pinned FFmpeg
+runtime has also been built and bundled as described in [PACKAGING.md](PACKAGING.md):
 
 ```sh
 mkdir -p build-gui/package

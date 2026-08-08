@@ -13,6 +13,10 @@ and releases use [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- A synchronization watchdog that replaces a frozen source image with a
+  dedicated `SIGNAL LOST` VGA screen when HSYNC/VSYNC-driven capture stops and
+  restores live video after stable input timing returns; the screen identifies
+  the adapter, compiled firmware version, and synchronization inputs awaited.
 - A continuous, backpressure-safe binary USB screen mode which delivers
   complete CRC-checked,
   640 x 288 one-bit frames at up to half the P2000M source rate without taking
@@ -45,6 +49,18 @@ and releases use [Semantic Versioning](https://semver.org/).
   controls, progress reporting, and safe finalization on disconnect or exit.
 - Mode-aware performance graphs which hide compression-only metrics in raw
   mode, plus rolling CRC errors per minute and a cumulative status-bar count.
+- Native Linux and macOS USB CDC backends while preserving the established
+  Windows SetupAPI and direct-COM implementation.
+- Automated Windows ZIP, Linux AppImage, and Intel/Apple-silicon macOS DMG
+  builds on every default-branch push and pull request.
+- A graphical Windows offline installer with Start-menu and desktop shortcuts,
+  license presentation, and an uninstall/maintenance tool; the portable ZIP
+  remains available alongside it.
+- A pinned, package-private FFmpeg 8.1.2 and x264 H.264 recording runtime in
+  every desktop package, including verified corresponding source archives,
+  license texts, checksums, build configuration, and an encoding smoke test.
+- Exact-commit release promotion which refuses tags unless both firmware and
+  every desktop package were already tested successfully on `master`.
 
 ### Changed
 

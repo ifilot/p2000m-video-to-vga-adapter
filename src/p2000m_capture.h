@@ -74,6 +74,8 @@ typedef struct {
     int32_t auto_phase_ticks;
     /** User trim added to auto_phase_ticks. */
     int32_t manual_phase_ticks;
+    /** Whether complete frames are still arriving at a credible source rate. */
+    bool signal_present;
 } p2000m_capture_stats_t;
 
 /** Detailed scores produced by a requested automatic phase-tuning pass. */
@@ -110,6 +112,16 @@ bool p2000m_capture_set_sample_phase(int phase_ticks);
  * @return true after a successful tune; false without a locked complete frame.
  */
 bool p2000m_capture_autotune(p2000m_capture_tuning_report_t *report);
+
+/**
+ * @brief Report whether valid HSYNC/VSYNC-driven frames are still arriving.
+ *
+ * A short watchdog bridges isolated missed frames. Lock is restored only after
+ * two consecutive frame completions establish a credible source period.
+ *
+ * @return true while the input timing is locked; false at startup or timeout.
+ */
+bool p2000m_capture_signal_present(void);
 
 /**
  * @brief Acquire the newest complete immutable raw capture buffer.

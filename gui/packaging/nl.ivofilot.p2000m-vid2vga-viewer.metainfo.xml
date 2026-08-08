@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+SPDX-License-Identifier: CC-BY-4.0
+-->
+<component type="desktop-application">
+  <id>nl.ivofilot.p2000m-vid2vga-viewer</id>
+  <name>P2000M VID2VGA Viewer</name>
+  <summary>View and configure a P2000M VID2VGA adapter</summary>
+  <metadata_license>CC-BY-4.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="nl.ivofilot">
+    <name>Ivo Filot</name>
+  </developer>
+  <description>
+    <p>
+      Displays the P2000M framebuffer received from a VID2VGA adapter and
+      provides access to its display configuration over USB CDC.
+    </p>
+  </description>
+  <launchable type="desktop-id">
+    nl.ivofilot.p2000m-vid2vga-viewer.desktop
+  </launchable>
+  <url type="homepage">
+    https://github.com/ifilot/p2000m-video-to-vga-adapter
+  </url>
+  <content_rating type="oars-1.1" />
+</component>

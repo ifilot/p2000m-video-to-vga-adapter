@@ -5,6 +5,8 @@ name: Firmware
 
 on:
   push:
+    branches:
+      - "**"
   pull_request:
   workflow_dispatch:
 
@@ -71,44 +73,25 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DPICO_BOARD=pico2
 
-      - name: Validate release tag and changelog
-        if: github.ref_type == 'tag'
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          project_version="$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' build/CMakeCache.txt)"
-          if [[ "$RELEASE_TAG" != "v$project_version" ]]; then
-            echo "Release tag $RELEASE_TAG does not match firmware v$project_version." >&2
-            exit 1
-          fi
-          if ! grep -Fq "## [$project_version]" CHANGELOG.md; then
-            echo "CHANGELOG.md has no section for $project_version." >&2
-            exit 1
-          fi
-
       - name: Compile
         shell: bash
         run: cmake --build build --parallel
 
-      - name: Package tagged build
-        if: github.ref_type == 'tag'
+      - name: Package tested default-branch firmware
+        if: >-
+          github.event_name == 'push' &&
+          github.ref_name == github.event.repository.default_branch
         shell: bash
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          project_version="${RELEASE_TAG#v}"
+          project_version="$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' build/CMakeCache.txt)"
           mkdir -p dist
           install -m 0644 build/src/p2000m-vid2vga-firmware.uf2 \
-            "dist/p2000m-vid2vga-firmware-$RELEASE_TAG.uf2"
-          awk -v heading="## [$project_version]" '
-            index($0, heading) == 1 { emit = 1 }
-            emit && /^## \[/ && index($0, heading) != 1 { exit }
-            emit { print }
-          ' CHANGELOG.md > dist/release-notes.md
+            "dist/p2000m-vid2vga-firmware-v${project_version}.uf2"
           install -m 0644 LICENSE.md THIRD_PARTY_NOTICES.md dist/
           install -m 0644 LICENSES/GPL-3.0-or-later.txt \
             dist/LICENSE-GPL-3.0-or-later.txt
+          install -m 0644 LICENSES/LGPL-3.0-only.txt \
+            dist/LICENSE-LGPL-3.0-only.txt
           install -m 0644 LICENSES/CERN-OHL-S-2.0.txt \
             dist/LICENSE-CERN-OHL-S-2.0.txt
           install -m 0644 LICENSES/CC-BY-4.0.txt \
@@ -116,67 +99,15 @@ jobs:
           install -m 0644 LICENSES/BSD-3-Clause.txt \
             dist/LICENSE-BSD-3-Clause.txt
           install -m 0644 LICENSES/MIT.txt dist/LICENSE-MIT.txt
-          cat >> dist/release-notes.md <<EOF
+          test -s "dist/p2000m-vid2vga-firmware-v${project_version}.uf2"
 
-          ### Source and licensing
-
-          The corresponding project source for this binary is available at
-          https://github.com/$GITHUB_REPOSITORY/tree/$RELEASE_TAG. The build
-          downloads the exact dependency revisions listed in
-          THIRD_PARTY_NOTICES.md. License and third-party notice files are
-          attached to this release alongside the UF2.
-          EOF
-          test -s "dist/p2000m-vid2vga-firmware-$RELEASE_TAG.uf2"
-          test -s dist/release-notes.md
-
-      - name: Upload tagged build
-        if: github.ref_type == 'tag'
+      - name: Preserve tested default-branch firmware
+        if: >-
+          github.event_name == 'push' &&
+          github.ref_name == github.event.repository.default_branch
         uses: actions/upload-artifact@v7
         with:
-          name: firmware-${{ github.ref_name }}
+          name: firmware-${{ github.sha }}
           path: dist/
           if-no-files-found: error
-          retention-days: 7
-
-  release:
-    name: Publish GitHub release
-    if: github.ref_type == 'tag'
-    needs: build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download tagged build
-        uses: actions/download-artifact@v7
-        with:
-          name: firmware-${{ github.ref_name }}
-          path: dist
-
-      - name: Create release and attach UF2
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          assets=(
-            "dist/p2000m-vid2vga-firmware-$RELEASE_TAG.uf2"
-            dist/LICENSE.md
-            dist/LICENSE-GPL-3.0-or-later.txt
-            dist/LICENSE-CERN-OHL-S-2.0.txt
-            dist/LICENSE-CC-BY-4.0.txt
-            dist/LICENSE-BSD-3-Clause.txt
-            dist/LICENSE-MIT.txt
-            dist/THIRD_PARTY_NOTICES.md
-          )
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "${assets[@]}" \
-              --clobber --repo "$GITHUB_REPOSITORY"
-          else
-            gh release create "$RELEASE_TAG" "${assets[@]}" \
-              --verify-tag \
-              --title "P2000M VID2VGA firmware $RELEASE_TAG" \
-              --notes-file dist/release-notes.md \
-              --repo "$GITHUB_REPOSITORY"
-          fi
+          retention-days: 30

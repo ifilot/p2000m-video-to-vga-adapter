@@ -87,18 +87,20 @@ build/src/p2000m-vid2vga-firmware.uf2
 > 252 MHz; cooling reduces thermal risk but does not make the overclock an
 > in-spec operating condition.
 
-### Windows screen viewer
+### Desktop screen viewer
 
-The `gui` directory contains a Qt 6 application for Windows. It automatically
-finds Raspberry Pi Pico CDC ports, verifies the VID2VGA firmware, switches the
-adapter into binary screen mode, and displays complete CRC-checked frames. It
+The `gui` directory contains a Qt 6 application for Windows, Linux, and macOS.
+It automatically finds Raspberry Pi Pico CDC ports, verifies the VID2VGA
+firmware, switches the adapter into binary screen mode, and displays complete
+CRC-checked frames. It
 returns the adapter to console mode when Disconnect is selected or the window
 is closed. Its Adapter menu can configure colors, borders, scaling, sampling
 phase, and optional persistent storage through the firmware's console.
 The viewer uses a monitor-derived application icon, places rolling live
 performance graphs beside the screen, and keeps the status bar focused on the
 COM port and source frame number. It can save lossless screenshots and can
-record H.264 MP4 video through an optional external `ffmpeg.exe`.
+record H.264 MP4 video through the FFmpeg runtime included in every packaged
+viewer distribution.
 
 Build it from an MSYS2 UCRT64 shell with Qt 6 installed:
 
@@ -107,7 +109,8 @@ cmake -S gui -B build-gui -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build-gui
 ```
 
-See [`gui/README.md`](gui/README.md) for deployment instructions.
+See [`gui/README.md`](gui/README.md) for use and build instructions and
+[`gui/PACKAGING.md`](gui/PACKAGING.md) for CI packaging and tagged releases.
 
 ## Video capture and VGA conversion
 
@@ -204,6 +207,15 @@ a nominal 60 Hz refresh rate. The P2000M and VGA rates are asynchronous, so core
 1 switches to the newest decoded source frame only at the beginning of a VGA
 frame. If no newer P2000M frame is ready, it repeats the current one. A VGA
 frame can therefore never contain parts of two source frames.
+
+Complete captured frames also act as a synchronization watchdog. If valid
+HSYNC/VSYNC-driven frames stop arriving for 100 ms, VGA remains active and
+shows a centered `SIGNAL LOST` warning instead of indefinitely freezing the
+last source image. The status card also identifies the adapter and its compiled
+firmware version and indicates that capture is waiting for both synchronization
+inputs. Live video returns only after two consecutive frame completions
+establish a credible source period, preventing a partial recovery frame from
+reaching the display.
 
 Horizontally, all 640 reconstructed source pixels map directly to the 640 VGA
 pixels. Vertically, native mode presents all 288 source lines one-to-one between
