@@ -21,8 +21,10 @@
 #include "pico/stdlib.h"
 
 enum {
-    /** Clock required for exact 63 MHz PIO sampling and 25.2 MHz VGA. */
-    REQUIRED_SYSTEM_CLOCK_HZ = 126000000,
+    /** Experimental clock retaining exact 63 MHz capture and 25.2 MHz VGA. */
+    REQUIRED_SYSTEM_CLOCK_HZ = 252000000,
+    /** Integer PIO divisor retaining the original 63 MHz sampling clock. */
+    CAPTURE_CLOCK_DIVIDER = 4,
 
     /** Conditioned, active-low monochrome video input. */
     VIDEO_PIN = 16,
@@ -76,9 +78,9 @@ _Static_assert(P2000M_CAPTURE_TICKS_PER_WORD == 30,
                "PIO timing assumes two branch cycles per packed word");
 _Static_assert(P2000M_CAPTURE_WORDS_PER_LINE * 2 == LINE_SAMPLE_GROUP_COUNT,
                "Each FIFO word must contain two sample groups");
-_Static_assert(REQUIRED_SYSTEM_CLOCK_HZ / 2u ==
+_Static_assert(REQUIRED_SYSTEM_CLOCK_HZ / CAPTURE_CLOCK_DIVIDER ==
                    P2000M_CAPTURE_SAMPLE_CLOCK_HZ,
-               "Capture PIO must use an integer divide-by-two clock");
+               "Capture PIO must retain the exact 63 MHz clock");
 
 /** PIO block reserved for input capture; scanvideo uses PIO0. */
 static PIO capture_pio = pio1;
@@ -387,7 +389,7 @@ static void initialize_capture_pio(void) {
     // bits are ignored; two fourteen-sample groups make every FIFO word.
     sm_config_set_in_shift(&config, false, true,
                            P2000M_CAPTURE_SAMPLES_PER_WORD);
-    sm_config_set_clkdiv_int_frac8(&config, 2, 0);  // 126 MHz / 2 = 63 MHz
+    sm_config_set_clkdiv_int_frac8(&config, CAPTURE_CLOCK_DIVIDER, 0);
 
     pio_sm_set_consecutive_pindirs(capture_pio, capture_sm, VIDEO_PIN, 3, false);
     pio_sm_init(capture_pio, capture_sm, capture_program_offset, &config);

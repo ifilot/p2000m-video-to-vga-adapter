@@ -18,7 +18,9 @@
 #include "hardware/clocks.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
+#include "hardware/vreg.h"
 #include "p2000m_capture.h"
+#include "p2000m_packbits.h"
 #include "pico/flash.h"
 #include "pico/multicore.h"
 #include "pico/scanvideo.h"
@@ -31,8 +33,10 @@
 static const char firmware_version[] = "v" P2000M_VID2VGA_VERSION;
 
 enum {
-    /** Shared system clock chosen for exact capture and VGA clock divisors. */
-    SYSTEM_CLOCK_KHZ = 126000,
+    /** Experimental 2x clock preserving exact capture and VGA divisors. */
+    SYSTEM_CLOCK_KHZ = 252000,
+    /** Maximum SDK-supported regulator setting used for the overclock. */
+    SYSTEM_CORE_VOLTAGE_MV = 1300,
     /** Active VGA pixels per line. */
     VGA_WIDTH = 640,
     /** Active VGA lines per frame. */
@@ -64,6 +68,8 @@ enum {
     SCREEN_FRAME_PAYLOAD_SIZE = DECODED_WORDS_PER_FRAME * sizeof(uint32_t),
     /** Maximum bytes offered to TinyUSB during one foreground-loop pass. */
     SCREEN_TX_SERVICE_BUDGET = 1024,
+    /** PackBits bytes staged before each TinyUSB FIFO write. */
+    SCREEN_PACKBITS_STAGING_SIZE = 1024,
     /** Source-frame sequence advance used to limit streaming to about 25 Hz. */
     SCREEN_SEQUENCE_STEP = 2,
     /** Number of alternating flash sectors used for atomic settings updates. */
@@ -138,7 +144,7 @@ typedef enum {
     USB_COMMAND_MODE,
     /** Periodic statistics stream; one exit key restores the prompt. */
     USB_LOG_MODE,
-    /** Host-paced binary 640 x 288 monochrome framebuffer stream. */
+    /** Continuous binary 640 x 288 monochrome framebuffer stream. */
     USB_SCREEN_MODE,
 } usb_interface_mode_t;
 
@@ -312,12 +318,45 @@ static uint32_t screen_tx_sequence;
 static uint32_t screen_last_sequence;
 /** Whether screen_last_sequence contains a completed frame. */
 static bool screen_last_sequence_valid;
-/** One frame credit received from the Windows viewer. */
-static bool screen_frame_requested;
+/** Whether the current screen session may send PackBits records. */
+static bool screen_packbits_enabled;
+/** Whether the frame in screen_tx_buffer selected PackBits encoding. */
+static bool screen_tx_packbits;
+/** Bytes in the encoded or raw payload currently being transmitted. */
+static size_t screen_tx_payload_size;
+/** Raw input position used by the streaming PackBits encoder. */
+static size_t screen_tx_packbits_input_offset;
+/** Aggregated PackBits runs submitted to TinyUSB in large writes. */
+static uint8_t screen_tx_packbits_staging[SCREEN_PACKBITS_STAGING_SIZE];
+/** Valid bytes in screen_tx_packbits_staging. */
+static size_t screen_tx_packbits_staging_size;
+/** Next unsent byte in screen_tx_packbits_staging. */
+static size_t screen_tx_packbits_staging_offset;
+/** CPU microseconds spent encoding the active frame into staging blocks. */
+static uint32_t screen_tx_encode_us;
+/** Timestamp at which the active record was prepared for transmission. */
+static uint64_t screen_tx_started_us;
 /** Complete screen frames queued to TinyUSB since boot. */
 static uint32_t screen_frames_sent;
+/** Raw fallback records queued since boot. */
+static uint32_t screen_raw_frames_sent;
+/** PackBits records queued since boot. */
+static uint32_t screen_packbits_frames_sent;
+/** Header and payload bytes queued since boot. */
+static uint64_t screen_bytes_sent;
+/** Payload bytes in the most recently completed record. */
+static uint32_t screen_last_payload_size;
+/** Most recent and maximum preparation durations. */
+static uint32_t screen_last_prepare_us;
+static uint32_t screen_maximum_prepare_us;
+/** Most recent and maximum streaming-encoder CPU durations. */
+static uint32_t screen_last_encode_us;
+static uint32_t screen_maximum_encode_us;
+/** Most recent and maximum end-to-end record queue durations. */
+static uint32_t screen_last_tx_us;
+static uint32_t screen_maximum_tx_us;
 
-/* Refill the CDC transmit FIFO from both the main loop and long decodes. */
+/** Refill the CDC transmit FIFO from both the main loop and long decodes. */
 static void service_screen_output(void);
 /** Flash slot holding the newest valid settings record, or -1 when absent. */
 static int saved_settings_slot = -1;
@@ -372,15 +411,21 @@ static display_style_t default_display_style(void) {
  * @return CRC-32 using polynomial 0xEDB88320 and standard inversion.
  */
 static uint32_t settings_crc32(const void *data, size_t length) {
+    // A 16-entry reflected CRC table is a useful middle ground on the Pico:
+    // it removes the eight per-bit branches previously paid for every screen
+    // byte while consuming only 64 bytes of flash-resident constant data.
+    static const uint32_t nibble_table[16] = {
+        0x00000000u, 0x1db71064u, 0x3b6e20c8u, 0x26d930acu,
+        0x76dc4190u, 0x6b6b51f4u, 0x4db26158u, 0x5005713cu,
+        0xedb88320u, 0xf00f9344u, 0xd6d6a3e8u, 0xcb61b38cu,
+        0x9b64c2b0u, 0x86d3d2d4u, 0xa00ae278u, 0xbdbdf21cu,
+    };
     const uint8_t *bytes = (const uint8_t *)data;
     uint32_t crc = 0xffffffffu;
     for (size_t i = 0; i < length; ++i) {
         crc ^= bytes[i];
-        for (unsigned bit = 0; bit < 8u; ++bit) {
-            const uint32_t polynomial =
-                (crc & 1u) != 0u ? 0xedb88320u : 0u;
-            crc = (crc >> 1u) ^ polynomial;
-        }
+        crc = (crc >> 4u) ^ nibble_table[crc & 0x0fu];
+        crc = (crc >> 4u) ^ nibble_table[crc & 0x0fu];
     }
     return ~crc;
 }
@@ -997,6 +1042,20 @@ static void print_statistics(void) {
     const uint32_t decode_max_us =
         __atomic_load_n(&maximum_decode_us, __ATOMIC_RELAXED);
 
+    printf("VID2VGA_USB experimental_overclock=yes sys_clock_khz=%u "
+           "core_voltage_mv=%u screen_frames=%" PRIu32
+           " screen_bytes=%llu raw_frames=%" PRIu32
+           " packbits_frames=%" PRIu32 " payload_bytes=%" PRIu32
+           " prepare_us=%" PRIu32 " prepare_max_us=%" PRIu32
+           " encode_us=%" PRIu32 " encode_max_us=%" PRIu32
+           " tx_us=%" PRIu32 " tx_max_us=%" PRIu32 "\n",
+           SYSTEM_CLOCK_KHZ, SYSTEM_CORE_VOLTAGE_MV, screen_frames_sent,
+           (unsigned long long)screen_bytes_sent, screen_raw_frames_sent,
+           screen_packbits_frames_sent, screen_last_payload_size,
+           screen_last_prepare_us, screen_maximum_prepare_us,
+           screen_last_encode_us, screen_maximum_encode_us,
+           screen_last_tx_us, screen_maximum_tx_us);
+
     if (capture.last_frame_period_us == 0) {
         printf("VID2VGA capture_frames=%" PRIu32
                " waiting_for_input vga_frames=%" PRIu32
@@ -1293,26 +1352,52 @@ static void abort_screen_transfer(void) {
     screen_tx_buffer = -1;
     screen_tx_header_offset = 0u;
     screen_tx_payload_offset = 0u;
-    screen_frame_requested = false;
+    screen_tx_payload_size = 0u;
+    screen_tx_packbits = false;
+    screen_tx_packbits_input_offset = 0u;
+    screen_tx_packbits_staging_size = 0u;
+    screen_tx_packbits_staging_offset = 0u;
+    screen_tx_encode_us = 0u;
+    screen_tx_started_us = 0u;
 }
 
 /**
  * @brief Assemble a stable version-one binary header for one decoded frame.
  *
- * The payload is the RP2350's native little-endian array of 32-bit words. In
- * each numeric word, the leftmost pixel is bit 31 and foreground is one.
- * Display colors and geometry flags let the host reproduce the VGA view.
+ * Type one carries the RP2350's native little-endian array of 32-bit words;
+ * type two independently PackBits-encodes those same bytes. In each numeric
+ * word, the leftmost pixel is bit 31 and foreground is one. Display colors and
+ * geometry flags let the host reproduce the VGA view.
  */
 static void build_screen_frame_header(uint32_t sequence,
                                       const uint32_t *frame) {
     enum {
         PAYLOAD_WORDS_LITTLE_ENDIAN = 1u << 0,
         PAYLOAD_PIXELS_MSB_FIRST = 1u << 1,
+        PAYLOAD_TIMING_DIAGNOSTICS = 1u << 2,
         STYLE_BORDER_ENABLED = 1u << 0,
         STYLE_BORDER_DOTTED = 1u << 1,
         STYLE_VERTICAL_STRETCH = 1u << 2,
     };
+    const uint64_t prepare_started = time_us_64();
     const display_style_t style = current_display_style();
+    const uint8_t *frame_bytes = (const uint8_t *)frame;
+    const size_t packbits_size = screen_packbits_enabled
+                                     ? p2000m_packbits_encoded_size(
+                                           frame_bytes,
+                                           SCREEN_FRAME_PAYLOAD_SIZE)
+                                     : SCREEN_FRAME_PAYLOAD_SIZE;
+    screen_tx_packbits = packbits_size < SCREEN_FRAME_PAYLOAD_SIZE;
+    screen_tx_payload_size = screen_tx_packbits
+                                 ? packbits_size
+                                 : SCREEN_FRAME_PAYLOAD_SIZE;
+    const uint32_t checksum =
+        settings_crc32(frame, SCREEN_FRAME_PAYLOAD_SIZE);
+    screen_last_prepare_us =
+        (uint32_t)(time_us_64() - prepare_started);
+    if (screen_last_prepare_us > screen_maximum_prepare_us) {
+        screen_maximum_prepare_us = screen_last_prepare_us;
+    }
     uint32_t style_flags = 0u;
     if (style.border_enabled) {
         style_flags |= STYLE_BORDER_ENABLED;
@@ -1326,21 +1411,32 @@ static void build_screen_frame_header(uint32_t sequence,
 
     memset(screen_frame_header, 0, sizeof(screen_frame_header));
     memcpy(screen_frame_header, "P2VF", 4u);
-    screen_frame_header[4] = 1u;  // Protocol version.
-    screen_frame_header[5] = 1u;  // Complete monochrome framebuffer.
+    // Protocol version one is retained for raw-record compatibility.
+    screen_frame_header[4] = 1u;
+    // Both record types represent one independent complete framebuffer.
+    screen_frame_header[5] = screen_tx_packbits ? 2u : 1u;
     screen_store_u16(&screen_frame_header[6],
                      PAYLOAD_WORDS_LITTLE_ENDIAN |
-                         PAYLOAD_PIXELS_MSB_FIRST);
+                         PAYLOAD_PIXELS_MSB_FIRST |
+                         PAYLOAD_TIMING_DIAGNOSTICS);
     screen_store_u32(&screen_frame_header[8], sequence);
-    screen_store_u32(&screen_frame_header[12], time_us_32());
+    const uint32_t timing_diagnostics =
+        (screen_last_prepare_us > UINT16_MAX
+             ? UINT16_MAX
+             : screen_last_prepare_us) |
+        ((screen_last_encode_us > UINT16_MAX
+              ? UINT16_MAX
+              : screen_last_encode_us)
+         << 16u);
+    screen_store_u32(&screen_frame_header[12], timing_diagnostics);
     screen_store_u16(&screen_frame_header[16], P2000M_CAPTURE_WIDTH);
     screen_store_u16(&screen_frame_header[18], P2000M_CAPTURE_HEIGHT);
     screen_store_u16(&screen_frame_header[20],
                      P2000M_CAPTURE_WIDTH / 8u);
     screen_store_u16(&screen_frame_header[22], SCREEN_FRAME_HEADER_SIZE);
-    screen_store_u32(&screen_frame_header[24], SCREEN_FRAME_PAYLOAD_SIZE);
-    screen_store_u32(&screen_frame_header[28],
-                     settings_crc32(frame, SCREEN_FRAME_PAYLOAD_SIZE));
+    screen_store_u32(&screen_frame_header[24],
+                     (uint32_t)screen_tx_payload_size);
+    screen_store_u32(&screen_frame_header[28], checksum);
     screen_store_u32(&screen_frame_header[32], style.foreground_rgb);
     screen_store_u32(&screen_frame_header[36], style.background_rgb);
     screen_store_u32(&screen_frame_header[40], style.border_rgb);
@@ -1348,10 +1444,10 @@ static void build_screen_frame_header(uint32_t sequence,
 }
 
 /**
- * @brief Claim the newest eligible frame after the host has granted credit.
+ * @brief Claim the newest eligible frame when the transmitter is idle.
  */
-static void begin_requested_screen_frame(void) {
-    if (!screen_frame_requested || screen_tx_buffer >= 0) {
+static void begin_available_screen_frame(void) {
+    if (screen_tx_buffer >= 0) {
         return;
     }
 
@@ -1361,13 +1457,37 @@ static void begin_requested_screen_frame(void) {
         return;
     }
 
-    screen_frame_requested = false;
     screen_tx_buffer = buffer_index;
     screen_tx_sequence = sequence;
     screen_tx_header_offset = 0u;
     screen_tx_payload_offset = 0u;
+    screen_tx_packbits_input_offset = 0u;
+    screen_tx_packbits_staging_size = 0u;
+    screen_tx_packbits_staging_offset = 0u;
+    screen_tx_encode_us = 0u;
     build_screen_frame_header(
         sequence, decoded_frames[(unsigned)buffer_index]);
+    screen_tx_started_us = time_us_64();
+}
+
+/** Aggregate PackBits runs into one large TinyUSB source buffer. */
+static void fill_screen_packbits_staging(void) {
+    screen_tx_packbits_staging_size = 0u;
+    screen_tx_packbits_staging_offset = 0u;
+    const uint64_t encode_started = time_us_64();
+    while (screen_tx_packbits_input_offset < SCREEN_FRAME_PAYLOAD_SIZE &&
+           SCREEN_PACKBITS_STAGING_SIZE - screen_tx_packbits_staging_size >=
+               P2000M_PACKBITS_MAX_CHUNK) {
+        const size_t chunk_size = p2000m_packbits_next_chunk(
+            (const uint8_t *)decoded_frames[screen_tx_buffer],
+            SCREEN_FRAME_PAYLOAD_SIZE,
+            &screen_tx_packbits_input_offset,
+            &screen_tx_packbits_staging[screen_tx_packbits_staging_size]);
+        hard_assert(chunk_size != 0u);
+        screen_tx_packbits_staging_size += chunk_size;
+    }
+    screen_tx_encode_us += (uint32_t)(time_us_64() - encode_started);
+    hard_assert(screen_tx_packbits_staging_size != 0u);
 }
 
 /**
@@ -1383,7 +1503,7 @@ static void service_screen_output(void) {
         return;
     }
 
-    begin_requested_screen_frame();
+    begin_available_screen_frame();
     if (screen_tx_buffer < 0) {
         return;
     }
@@ -1400,10 +1520,19 @@ static void service_screen_output(void) {
         if (screen_tx_header_offset < SCREEN_FRAME_HEADER_SIZE) {
             source = &screen_frame_header[screen_tx_header_offset];
             remaining = SCREEN_FRAME_HEADER_SIZE - screen_tx_header_offset;
+        } else if (screen_tx_packbits) {
+            if (screen_tx_packbits_staging_offset ==
+                screen_tx_packbits_staging_size) {
+                fill_screen_packbits_staging();
+            }
+            source = &screen_tx_packbits_staging[
+                screen_tx_packbits_staging_offset];
+            remaining = screen_tx_packbits_staging_size -
+                        screen_tx_packbits_staging_offset;
         } else {
             source = (const uint8_t *)decoded_frames[screen_tx_buffer] +
                      screen_tx_payload_offset;
-            remaining = SCREEN_FRAME_PAYLOAD_SIZE - screen_tx_payload_offset;
+            remaining = screen_tx_payload_size - screen_tx_payload_offset;
         }
 
         size_t count = remaining;
@@ -1423,16 +1552,45 @@ static void service_screen_output(void) {
             screen_tx_header_offset += written;
         } else {
             screen_tx_payload_offset += written;
+            if (screen_tx_packbits) {
+                screen_tx_packbits_staging_offset += written;
+            }
         }
 
         if (screen_tx_header_offset == SCREEN_FRAME_HEADER_SIZE &&
-            screen_tx_payload_offset == SCREEN_FRAME_PAYLOAD_SIZE) {
+            screen_tx_payload_offset == screen_tx_payload_size) {
             release_decoded_frame_from_usb((unsigned)screen_tx_buffer);
             screen_tx_buffer = -1;
             screen_last_sequence = screen_tx_sequence;
             screen_last_sequence_valid = true;
             ++screen_frames_sent;
-            break;
+            screen_bytes_sent += SCREEN_FRAME_HEADER_SIZE +
+                                 screen_tx_payload_size;
+            screen_last_payload_size = (uint32_t)screen_tx_payload_size;
+            if (screen_tx_packbits) {
+                ++screen_packbits_frames_sent;
+            } else {
+                ++screen_raw_frames_sent;
+            }
+            screen_last_encode_us = screen_tx_encode_us;
+            if (screen_last_encode_us > screen_maximum_encode_us) {
+                screen_maximum_encode_us = screen_last_encode_us;
+            }
+            screen_last_tx_us =
+                (uint32_t)(time_us_64() - screen_tx_started_us);
+            if (screen_last_tx_us > screen_maximum_tx_us) {
+                screen_maximum_tx_us = screen_last_tx_us;
+            }
+            if (budget == 0u) {
+                break;
+            }
+            // Continue directly into the newest eligible frame when USB FIFO
+            // capacity remains. TinyUSB itself supplies backpressure if the
+            // host stops reading, so no per-frame command round trip is needed.
+            begin_available_screen_frame();
+            if (screen_tx_buffer < 0) {
+                break;
+            }
         }
     }
     tud_cdc_write_flush();
@@ -1597,7 +1755,12 @@ static void print_usb_prompt(void) {
  * @return Nothing.
  */
 static void print_firmware_version(void) {
-    printf("P2000M VID2VGA firmware %s\n", firmware_version);
+    printf("P2000M VID2VGA firmware %s\n"
+           "EXPERIMENTAL clock=%uMHz core_voltage=%u.%03uV "
+           "official_limit=150MHz\n",
+           firmware_version, SYSTEM_CLOCK_KHZ / 1000u,
+           SYSTEM_CORE_VOLTAGE_MV / 1000u,
+           SYSTEM_CORE_VOLTAGE_MV % 1000u);
 }
 
 /**
@@ -1627,18 +1790,31 @@ static void enter_usb_command_mode(void) {
 }
 
 /**
- * @brief Leave the console and prepare host-paced binary screen output.
+ * @brief Leave the console and prepare continuous binary screen output.
  */
-static void enter_usb_screen_mode(void) {
+static void enter_usb_screen_mode(const char *encoding) {
+    if (*encoding == '\0' || strcmp(encoding, "raw") == 0) {
+        screen_packbits_enabled = false;
+    } else if (strcmp(encoding, "packbits") == 0 ||
+               strcmp(encoding, "rle") == 0) {
+        screen_packbits_enabled = true;
+    } else {
+        printf("Unknown screen encoding '%s'; use RAW or PACKBITS.\n",
+               encoding);
+        return;
+    }
     abort_screen_transfer();
     screen_last_sequence_valid = false;
     usb_command_length = 0u;
     usb_command_overflow = false;
     printf("SCREEN mode=binary version=1 width=%u height=%u fps=%u.%03u "
-           "header=%u payload=%u credit=frame exit=console\n",
+           "header=%u payload=%u flow=continuous encoding=%s "
+           "clock_khz=%u experimental=yes exit=console\n",
            P2000M_CAPTURE_WIDTH, P2000M_CAPTURE_HEIGHT,
            25047u / 1000u, 25047u % 1000u,
-           SCREEN_FRAME_HEADER_SIZE, SCREEN_FRAME_PAYLOAD_SIZE);
+           SCREEN_FRAME_HEADER_SIZE, SCREEN_FRAME_PAYLOAD_SIZE,
+           screen_packbits_enabled ? "packbits+raw" : "raw",
+           SYSTEM_CLOCK_KHZ);
     stdio_flush();
     usb_interface_mode = USB_SCREEN_MODE;
 }
@@ -1665,7 +1841,7 @@ static void print_help(void) {
            "  version | v                show the firmware version\n"
            "  license                    copyright and license information\n"
            "  log                        stream statistics every two seconds\n"
-           "  screen                     enter host-paced binary screen mode\n"
+           "  screen [raw|packbits]      enter continuous binary screen mode\n"
            "  settings                   current runtime and storage settings\n"
            "  border [on|off|toggle]     control the visible-area rectangle\n"
            "  border-color <color>       set the independent border color\n"
@@ -1752,7 +1928,7 @@ static void process_usb_command(char *command) {
         enter_usb_log_mode();
     } else if (strcmp(command, "screen") == 0 ||
                strcmp(command, "stream") == 0) {
-        enter_usb_screen_mode();
+        enter_usb_screen_mode(argument);
     } else if (strcmp(command, "settings") == 0) {
         print_display_settings();
     } else if (strcmp(command, "colors") == 0) {
@@ -1912,7 +2088,8 @@ static void poll_usb_commands(void) {
                     char *screen_command =
                         normalize_command(usb_command_buffer);
                     if (strcmp(screen_command, "frame") == 0) {
-                        screen_frame_requested = true;
+                        // Compatibility with credit-based version-one viewers.
+                        // Continuous mode has already made the request implicit.
                     } else if (strcmp(screen_command, "console") == 0 ||
                                strcmp(screen_command, "stop") == 0) {
                         tud_cdc_write_clear();
@@ -1981,8 +2158,13 @@ static void poll_usb_commands(void) {
  * @return Does not return under normal operation.
  */
 int main(void) {
+    // EXPERIMENTAL: 252 MHz is well beyond the RP2350's 150 MHz rating. Raise
+    // the regulator first and allow it to settle. This deliberately stays at
+    // the SDK's 1.30 V limit rather than disabling the voltage safety limit.
+    vreg_set_voltage(VREG_VOLTAGE_1_30);
+    sleep_us(1000u);
     if (!set_sys_clock_khz(SYSTEM_CLOCK_KHZ, true)) {
-        panic("Unable to set the 126 MHz system clock");
+        panic("Unable to set the experimental 252 MHz system clock");
     }
 
     // The application initializes TinyUSB while stdio_usb retains the default

@@ -3,11 +3,17 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+/**
+ * @file main.cpp
+ * @brief Qt 6 Windows viewer and USB-console frontend for P2000M VID2VGA.
+ */
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <deque>
 #include <utility>
 #include <vector>
 
@@ -23,35 +29,59 @@
 #include <QCloseEvent>
 #include <QColorDialog>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QFont>
 #include <QFormLayout>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QImage>
+#include <QIcon>
 #include <QKeySequence>
 #include <QLabel>
 #include <QMainWindow>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPainter>
+#include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScrollArea>
 #include <QSpinBox>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include "metric_graph_widget.h"
+#include "p2000m_packbits.h"
+
 namespace {
 
+/** Raspberry Pi USB vendor identifier used to shortlist Pico CDC devices. */
 constexpr quint16 kPicoVendorId = 0x2e8a;
+/** Bytes in the version-one binary screen-record header. */
 constexpr int kFrameHeaderSize = 48;
+/** Bytes in one unpacked 640 x 288 one-bit source framebuffer. */
 constexpr int kFramePayloadSize = 640 * 288 / 8;
+/** PackBits upper bound used to reject corrupt payload-size fields. */
+constexpr int kMaximumPackBitsSize =
+    kFramePayloadSize +
+    (kFramePayloadSize + P2000M_PACKBITS_MAX_RUN - 1) /
+        P2000M_PACKBITS_MAX_RUN;
+/** Reconstructed source width in pixels. */
 constexpr int kSourceWidth = 640;
+/** Reconstructed source height in lines. */
 constexpr int kSourceHeight = 288;
+/** Active line count reproduced by the VGA monitor view. */
 constexpr int kVgaHeight = 480;
 
+/** Build the reflected CRC-32 lookup table used for frame validation. */
 constexpr std::array<quint32, 256> makeCrc32Table() {
     std::array<quint32, 256> table = {};
     for (quint32 value = 0; value < table.size(); ++value) {
@@ -67,12 +97,14 @@ constexpr std::array<quint32, 256> makeCrc32Table() {
 
 constexpr auto kCrc32Table = makeCrc32Table();
 
+/** Load an unaligned little-endian 16-bit protocol field. */
 quint16 loadU16(const char *data) {
     const auto *bytes = reinterpret_cast<const unsigned char *>(data);
     return static_cast<quint16>(bytes[0]) |
            (static_cast<quint16>(bytes[1]) << 8u);
 }
 
+/** Load an unaligned little-endian 32-bit protocol field. */
 quint32 loadU32(const char *data) {
     const auto *bytes = reinterpret_cast<const unsigned char *>(data);
     return static_cast<quint32>(bytes[0]) |
@@ -81,6 +113,7 @@ quint32 loadU32(const char *data) {
            (static_cast<quint32>(bytes[3]) << 24u);
 }
 
+/** Calculate the standard reflected CRC-32 used by screen records. */
 quint32 crc32(const QByteArray &data) {
     quint32 crc = 0xffffffffu;
     for (const unsigned char byte : data) {
@@ -89,22 +122,39 @@ quint32 crc32(const QByteArray &data) {
     return ~crc;
 }
 
+/** Display and capture settings exchanged through the firmware console. */
 struct DeviceSettings {
+    /** Foreground color in 0xRRGGBB form. */
     quint32 foreground = 0xffffffu;
+    /** Background color in 0xRRGGBB form. */
     quint32 background = 0x000000u;
+    /** Border color in 0xRRGGBB form. */
     quint32 border = 0xff00ffu;
+    /** Whether the one-pixel screen border is enabled. */
     bool borderEnabled = false;
+    /** Whether the border uses the two-on, two-off dotted pattern. */
     bool borderDotted = false;
+    /** Whether 288 source lines are stretched over all 480 VGA lines. */
     bool stretch = false;
+    /** Manual capture phase adjustment in 63 MHz sampling ticks. */
     int phaseTrim = 0;
+    /** Firmware-reported persistence state. */
     QString storage = QStringLiteral("default");
 };
 
+/** Format a 0xRRGGBB value as the console's uppercase #RRGGBB notation. */
 QString colorText(quint32 rgb) {
     return QStringLiteral("#%1").arg(rgb & 0x00ffffffu, 6, 16,
                                      QLatin1Char('0')).toUpper();
 }
 
+/**
+ * Parse the machine-readable DISPLAY record returned by the firmware.
+ *
+ * @param consoleText Complete or partial console response containing DISPLAY.
+ * @param settings Destination updated only after all fields validate.
+ * @return true when a valid settings record was found; false otherwise.
+ */
 bool parseDeviceSettings(const QByteArray &consoleText,
                          DeviceSettings *settings) {
     static const QRegularExpression expression(QStringLiteral(
@@ -139,6 +189,14 @@ bool parseDeviceSettings(const QByteArray &consoleText,
     return true;
 }
 
+/**
+ * Enumerate present Windows COM ports belonging to Raspberry Pi Pico devices.
+ *
+ * Firmware identity is deliberately verified later over the console because
+ * the USB vendor identifier alone cannot distinguish this adapter.
+ *
+ * @return Stable, case-insensitively sorted COM-port names.
+ */
 QStringList picoSerialPorts() {
     QStringList ports;
     HDEVINFO deviceInfo = SetupDiGetClassDevsW(
@@ -213,10 +271,18 @@ QStringList picoSerialPorts() {
     return ports;
 }
 
+/** Synchronous, nonblocking-read wrapper around the Windows COM-port API. */
 class WindowsSerialPort {
 public:
+    /** Close the native handle before the wrapper is destroyed. */
     ~WindowsSerialPort() { close(); }
 
+    /**
+     * Open and configure a USB CDC COM port for binary traffic.
+     *
+     * @param portName Windows port name such as COM3.
+     * @return true when the handle and communication parameters are ready.
+     */
     bool open(const QString &portName) {
         close();
         const QString path = QStringLiteral("\\\\.\\") + portName;
@@ -265,6 +331,7 @@ public:
         return true;
     }
 
+    /** Close the port and clear its user-facing name. */
     void close() {
         if (handle_ != INVALID_HANDLE_VALUE) {
             EscapeCommFunction(handle_, CLRDTR);
@@ -274,9 +341,12 @@ public:
         name_.clear();
     }
 
+    /** Return whether a valid Windows port handle is owned. */
     bool isOpen() const { return handle_ != INVALID_HANDLE_VALUE; }
+    /** Return the COM-port name associated with the current handle. */
     QString name() const { return name_; }
 
+    /** Write an entire command, retrying until every byte is accepted. */
     bool write(const QByteArray &data) {
         if (!isOpen()) {
             return false;
@@ -297,6 +367,12 @@ public:
         return true;
     }
 
+    /**
+     * Drain currently queued input without waiting for future data.
+     *
+     * @param ok Receives false when a Windows communication call fails.
+     * @return All bytes available during this bounded drain operation.
+     */
     QByteArray readAvailable(bool *ok) {
         QByteArray result;
         *ok = isOpen();
@@ -332,12 +408,16 @@ public:
     }
 
 private:
+    /** Owned Windows file handle, or INVALID_HANDLE_VALUE while closed. */
     HANDLE handle_ = INVALID_HANDLE_VALUE;
+    /** User-facing COM-port name corresponding to handle_. */
     QString name_;
 };
 
+/** Color-selection button that previews and returns one 24-bit RGB value. */
 class ColorButton final : public QPushButton {
 public:
+    /** Construct the button with an initial 0xRRGGBB color. */
     explicit ColorButton(quint32 rgb, QWidget *parent = nullptr)
         : QPushButton(parent) {
         setMinimumWidth(140);
@@ -351,8 +431,10 @@ public:
         });
     }
 
+    /** Return the selected color in 0xRRGGBB form. */
     quint32 color() const { return rgb_; }
 
+    /** Update the selected color, label, and contrast-aware button style. */
     void setColor(quint32 rgb) {
         rgb_ = rgb & 0x00ffffffu;
         const int red = static_cast<int>((rgb_ >> 16u) & 0xffu);
@@ -370,16 +452,20 @@ public:
     }
 
 private:
+    /** Selected color in 0xRRGGBB form. */
     quint32 rgb_ = 0;
 };
 
+/** Modal editor for display geometry, colors, and capture phase. */
 class ConfigurationDialog final : public QDialog {
 public:
+    /** Distinguishes runtime-only application from apply-and-save. */
     enum Result {
         Apply = QDialog::Accepted,
         ApplyAndSave = 2,
     };
 
+    /** Populate controls from the adapter's current settings. */
     ConfigurationDialog(const DeviceSettings &settings,
                         QWidget *parent = nullptr)
         : QDialog(parent) {
@@ -446,6 +532,7 @@ public:
         });
     }
 
+    /** Return a complete settings snapshot assembled from the controls. */
     DeviceSettings settings() const {
         DeviceSettings result;
         result.foreground = foreground_->color();
@@ -459,6 +546,7 @@ public:
     }
 
 private:
+    /** Restore every editable control from one settings snapshot. */
     void loadSettings(const DeviceSettings &settings) {
         foreground_->setColor(settings.foreground);
         background_->setColor(settings.background);
@@ -469,45 +557,68 @@ private:
         phaseTrim_->setValue(settings.phaseTrim);
     }
 
+    /** Foreground color selector. */
     ColorButton *foreground_ = nullptr;
+    /** Background color selector. */
     ColorButton *background_ = nullptr;
+    /** Border color selector. */
     ColorButton *borderColor_ = nullptr;
+    /** Border enable control. */
     QCheckBox *borderEnabled_ = nullptr;
+    /** Solid/dotted border selector. */
     QComboBox *borderStyle_ = nullptr;
+    /** Native/fit vertical scaling selector. */
     QComboBox *scaling_ = nullptr;
+    /** Manual capture phase adjustment. */
     QSpinBox *phaseTrim_ = nullptr;
 };
 
+/** Paints the reconstructed VGA frame and records actual presentation cost. */
 class ScreenWidget final : public QWidget {
 public:
+    /** Construct an expanding widget with a native 640 x 480 minimum size. */
     explicit ScreenWidget(QWidget *parent = nullptr) : QWidget(parent) {
         setMinimumSize(640, 480);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     }
 
+    /** Publish a new complete frame and schedule a coalescible repaint. */
     void setFrame(QImage frame) {
         frame_ = std::move(frame);
+        ++frameSerial_;
         update();
     }
 
+    /** Select smooth interpolation or nearest-neighbor scaling. */
     void setSmoothScaling(bool enabled) {
         smoothScaling_ = enabled;
         update();
     }
 
+    /** Enable or disable whole-number pixel scaling. */
     void setIntegerScaling(bool enabled) {
         integerScaling_ = enabled;
         update();
     }
 
+    /** Return whether a decoded image is available. */
     bool hasFrame() const { return !frame_.isNull(); }
 
+    /** Save the unscaled reconstructed VGA image. */
     bool saveFrame(const QString &filename) const {
         return !frame_.isNull() && frame_.save(filename);
     }
 
+    /** Return the smoothed rate of unique frames actually painted. */
+    double paintFps() const { return smoothedPaintFps_; }
+    /** Return the smoothed wall time of a unique-frame paint operation. */
+    double paintMilliseconds() const { return smoothedPaintMilliseconds_; }
+
 protected:
+    /** Paint one aspect-correct image and update presentation telemetry. */
     void paintEvent(QPaintEvent *) override {
+        QElapsedTimer duration;
+        duration.start();
         QPainter painter(this);
         painter.fillRect(rect(), Qt::black);
         if (frame_.isNull()) {
@@ -535,25 +646,71 @@ protected:
         painter.setRenderHint(QPainter::SmoothPixmapTransform,
                               smoothScaling_ && !integerScaling_);
         painter.drawImage(target, frame_);
+
+        if (paintedSerial_ != frameSerial_) {
+            paintedSerial_ = frameSerial_;
+            const double milliseconds =
+                static_cast<double>(duration.nsecsElapsed()) / 1000000.0;
+            smoothedPaintMilliseconds_ =
+                smoothedPaintMilliseconds_ == 0.0
+                    ? milliseconds
+                    : smoothedPaintMilliseconds_ * 0.85 +
+                          milliseconds * 0.15;
+            if (paintClock_.isValid()) {
+                const qint64 elapsed = paintClock_.restart();
+                if (elapsed > 0) {
+                    const double instantaneous = 1000.0 / elapsed;
+                    smoothedPaintFps_ = smoothedPaintFps_ == 0.0
+                                            ? instantaneous
+                                            : smoothedPaintFps_ * 0.85 +
+                                                  instantaneous * 0.15;
+                }
+            } else {
+                paintClock_.start();
+            }
+        }
     }
 
 private:
+    /** Most recent complete 640 x 480 image. */
     QImage frame_;
+    /** Whether noninteger scaling uses smooth interpolation. */
     bool smoothScaling_ = true;
+    /** Whether image dimensions are constrained to integer multiples. */
     bool integerScaling_ = false;
+    /** Serial assigned to each image accepted by setFrame(). */
+    quint64 frameSerial_ = 0;
+    /** Serial of the most recent image included in paint telemetry. */
+    quint64 paintedSerial_ = 0;
+    /** Interval timer between uniquely painted frames. */
+    QElapsedTimer paintClock_;
+    /** Exponentially smoothed unique-frame presentation rate. */
+    double smoothedPaintFps_ = 0.0;
+    /** Exponentially smoothed unique-frame paint duration. */
+    double smoothedPaintMilliseconds_ = 0.0;
 };
 
+/** Coordinates discovery, protocol state, configuration, and presentation. */
 class MainWindow final : public QMainWindow {
 public:
+    /** Build the complete interface and start automatic adapter discovery. */
     MainWindow() {
-        setWindowTitle(QStringLiteral("P2000M VID2VGA Viewer"));
-        resize(880, 720);
+        setWindowTitle(QStringLiteral("P2000M VID2VGA Viewer v%1")
+                           .arg(QStringLiteral(P2000M_VIEWER_VERSION)));
+        setWindowIcon(QIcon(QStringLiteral(
+            ":/icons/p2000m-vid2vga-viewer.png")));
+        resize(1160, 760);
         createMenus();
 
         auto *central = new QWidget(this);
         auto *layout = new QVBoxLayout(central);
+        auto *contentLayout = new QHBoxLayout;
+        contentLayout->setContentsMargins(0, 0, 0, 0);
         screen_ = new ScreenWidget(central);
-        layout->addWidget(screen_, 1);
+        contentLayout->addWidget(screen_, 1);
+        statisticsPanel_ = createStatisticsPanel(central);
+        contentLayout->addWidget(statisticsPanel_);
+        layout->addLayout(contentLayout, 1);
 
         controlsWidget_ = new QWidget(central);
         auto *controls = new QHBoxLayout(controlsWidget_);
@@ -581,13 +738,33 @@ public:
         });
         connect(&pollTimer_, &QTimer::timeout, this,
                 [this] { serviceConnection(); });
+        connect(
+            &ffmpegProcess_,
+            qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
+            this,
+            [this](int exitCode, QProcess::ExitStatus exitStatus) {
+                handleRecordingFinished(exitCode, exitStatus);
+            });
         pollTimer_.setTimerType(Qt::PreciseTimer);
         pollTimer_.start(1);
         QTimer::singleShot(0, this, [this] { beginDiscovery(); });
     }
 
 protected:
+    /** Restore console mode before allowing the native window to close. */
     void closeEvent(QCloseEvent *event) override {
+        closing_ = true;
+        if (recording_) {
+            stopRecording();
+        }
+        if (recordingStopping_ &&
+            !ffmpegProcess_.waitForFinished(5000)) {
+            ffmpegProcess_.terminate();
+            if (!ffmpegProcess_.waitForFinished(1000)) {
+                ffmpegProcess_.kill();
+                ffmpegProcess_.waitForFinished(1000);
+            }
+        }
         if (serial_.isOpen()) {
             serial_.write(QByteArrayLiteral("console\r\n"));
             serial_.close();
@@ -596,6 +773,7 @@ protected:
     }
 
 private:
+    /** Mutually exclusive phases of discovery and serial protocol handling. */
     enum class State {
         Disconnected,
         Probing,
@@ -604,9 +782,76 @@ private:
         AwaitingConsole,
         QueryingSettings,
         Configuring,
+        SwitchingEncoding,
         Disconnecting,
     };
 
+    /** Build the scrollable right-hand collection of live metric graphs. */
+    QWidget *createStatisticsPanel(QWidget *parent) {
+        auto *scrollArea = new QScrollArea(parent);
+        scrollArea->setWidgetResizable(true);
+        scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        scrollArea->setFrameShape(QFrame::NoFrame);
+        scrollArea->setMinimumWidth(300);
+        scrollArea->setMaximumWidth(330);
+
+        auto *container = new QWidget(scrollArea);
+        auto *statisticsLayout = new QVBoxLayout(container);
+        statisticsLayout->setContentsMargins(6, 0, 2, 0);
+        statisticsLayout->setSpacing(2);
+
+        auto *heading = new QLabel(QStringLiteral("Live performance"),
+                                   container);
+        QFont headingFont = heading->font();
+        headingFont.setBold(true);
+        headingFont.setPointSizeF(headingFont.pointSizeF() + 1.0);
+        heading->setFont(headingFont);
+        statisticsLayout->addWidget(heading);
+
+        auto *explanation = new QLabel(
+            QStringLiteral("Approximately 60 seconds of history"),
+            container);
+        explanation->setStyleSheet(
+            QStringLiteral("color: palette(mid); padding-bottom: 3px;"));
+        statisticsLayout->addWidget(explanation);
+
+        const auto addGraph = [&](MetricGraphWidget **destination,
+                                  const QString &title,
+                                  const QColor &color) {
+            *destination = new MetricGraphWidget(title, color, container);
+            statisticsLayout->addWidget(*destination);
+        };
+        addGraph(&usbGraph_, QStringLiteral("USB throughput"),
+                 QColor(0, 137, 168));
+        addGraph(&frameRateGraph_, QStringLiteral("Received frames"),
+                 QColor(0, 120, 215));
+        addGraph(&sourceStepGraph_, QStringLiteral("Source sequence step"),
+                 QColor(108, 74, 182));
+        addGraph(&payloadGraph_, QStringLiteral("Payload size"),
+                 QColor(0, 153, 102));
+        addGraph(&renderGraph_, QStringLiteral("Viewer rendering"),
+                 QColor(214, 127, 0));
+        addGraph(&unpackGraph_, QStringLiteral("PackBits unpacking"),
+                 QColor(174, 89, 0));
+        addGraph(&paintRateGraph_, QStringLiteral("Painted frames"),
+                 QColor(42, 126, 66));
+        addGraph(&paintTimeGraph_, QStringLiteral("Paint duration"),
+                 QColor(87, 139, 46));
+        addGraph(&firmwarePrepareGraph_,
+                 QStringLiteral("Firmware preparation"),
+                 QColor(190, 44, 74));
+        addGraph(&firmwareEncodeGraph_, QStringLiteral("Firmware encoding"),
+                 QColor(220, 70, 116));
+        addGraph(&crcGraph_, QStringLiteral("CRC error rate"),
+                 QColor(200, 35, 35));
+        updateEncodingGraphVisibility();
+        statisticsLayout->addStretch(1);
+
+        scrollArea->setWidget(container);
+        return scrollArea;
+    }
+
+    /** Create all persistent actions, menus, shortcuts, and connections. */
     void createMenus() {
         auto *fileMenu = menuBar()->addMenu(QStringLiteral("&File"));
         connectAction_ = fileMenu->addAction(QStringLiteral("&Connect"));
@@ -618,6 +863,16 @@ private:
             QStringLiteral("Save &Screenshot…"));
         screenshotAction_->setShortcut(QKeySequence::Save);
         screenshotAction_->setEnabled(false);
+        startRecordingAction_ = fileMenu->addAction(
+            QStringLiteral("Start &Recording…"));
+        startRecordingAction_->setShortcut(
+            QKeySequence(QStringLiteral("Ctrl+Shift+R")));
+        startRecordingAction_->setEnabled(false);
+        stopRecordingAction_ = fileMenu->addAction(
+            QStringLiteral("S&top Recording"));
+        stopRecordingAction_->setShortcut(
+            QKeySequence(QStringLiteral("Ctrl+Shift+S")));
+        stopRecordingAction_->setEnabled(false);
         fileMenu->addSeparator();
         auto *exitAction = fileMenu->addAction(QStringLiteral("E&xit"));
         exitAction->setShortcut(QKeySequence::Quit);
@@ -628,6 +883,19 @@ private:
         configureAction_->setShortcut(
             QKeySequence(QStringLiteral("Ctrl+,")));
         configureAction_->setEnabled(false);
+        auto *encodingMenu = deviceMenu->addMenu(
+            QStringLiteral("Stream &Encoding"));
+        auto *encodingGroup = new QActionGroup(this);
+        auto *rawEncodingAction = encodingMenu->addAction(
+            QStringLiteral("&Raw (recommended)"));
+        auto *packBitsEncodingAction = encodingMenu->addAction(
+            QStringLiteral("&PackBits (experimental)"));
+        rawEncodingAction->setCheckable(true);
+        packBitsEncodingAction->setCheckable(true);
+        rawEncodingAction->setChecked(true);
+        encodingGroup->addAction(rawEncodingAction);
+        encodingGroup->addAction(packBitsEncodingAction);
+        encodingGroup->setExclusive(true);
 
         auto *viewMenu = menuBar()->addMenu(QStringLiteral("&View"));
         auto *filterMenu = viewMenu->addMenu(
@@ -668,8 +936,20 @@ private:
         connect(screenshotAction_, &QAction::triggered, this, [this] {
             saveScreenshot();
         });
+        connect(startRecordingAction_, &QAction::triggered, this, [this] {
+            startRecording();
+        });
+        connect(stopRecordingAction_, &QAction::triggered, this, [this] {
+            stopRecording();
+        });
         connect(configureAction_, &QAction::triggered, this, [this] {
             beginConfiguration();
+        });
+        connect(rawEncodingAction, &QAction::triggered, this, [this] {
+            setStreamEncoding(false);
+        });
+        connect(packBitsEncodingAction, &QAction::triggered, this, [this] {
+            setStreamEncoding(true);
         });
         connect(smoothAction, &QAction::triggered, this, [this] {
             screen_->setSmoothScaling(true);
@@ -689,18 +969,26 @@ private:
         });
         connect(exitAction, &QAction::triggered, this, &QWidget::close);
         connect(aboutAction, &QAction::triggered, this, [this] {
-            QMessageBox::about(
-                this, QStringLiteral("About P2000M VID2VGA Viewer"),
+            QMessageBox about(this);
+            about.setWindowTitle(
+                QStringLiteral("About P2000M VID2VGA Viewer"));
+            about.setWindowIcon(QApplication::windowIcon());
+            about.setIconPixmap(
+                QApplication::windowIcon().pixmap(QSize(96, 96)));
+            about.setTextFormat(Qt::RichText);
+            about.setText(
                 QStringLiteral(
-                    "<h3>P2000M VID2VGA Viewer %1</h3>"
+                    "<h3>P2000M VID2VGA Viewer v%1</h3>"
                     "<p>A live Qt 6 monitor and configuration utility for "
                     "the Raspberry Pi Pico 2 P2000M video adapter.</p>"
                     "<p>Copyright © 2026 Ivo Filot<br>"
                     "Licensed under GNU GPL v3 or later.</p>")
                     .arg(QStringLiteral(P2000M_VIEWER_VERSION)));
+            about.exec();
         });
     }
 
+    /** Ask for a filename and save the latest unscaled framebuffer. */
     void saveScreenshot() {
         if (!screen_->hasFrame()) {
             return;
@@ -716,10 +1004,197 @@ private:
         }
     }
 
+    /** Locate FFmpeg beside the app, on PATH, or in standard MSYS2 prefixes. */
+    QString findFfmpegExecutable() const {
+        const QDir applicationDirectory(
+            QCoreApplication::applicationDirPath());
+        QStringList candidates = {
+            applicationDirectory.filePath(QStringLiteral("ffmpeg.exe")),
+            applicationDirectory.filePath(QStringLiteral("ffmpeg")),
+            QStandardPaths::findExecutable(QStringLiteral("ffmpeg.exe")),
+            QStandardPaths::findExecutable(QStringLiteral("ffmpeg")),
+        };
+
+        // Explorer-launched applications often do not inherit the MSYS2
+        // shell PATH, so also check its active prefix and default locations.
+        const auto appendPrefix = [&candidates](const QString &prefix) {
+            if (!prefix.isEmpty()) {
+                candidates.append(
+                    QDir(prefix).filePath(QStringLiteral("bin/ffmpeg.exe")));
+            }
+        };
+        appendPrefix(QString::fromLocal8Bit(qgetenv("MSYSTEM_PREFIX")));
+        appendPrefix(QString::fromLocal8Bit(qgetenv("MINGW_PREFIX")));
+        candidates.append({
+            QStringLiteral("C:/msys64/ucrt64/bin/ffmpeg.exe"),
+            QStringLiteral("C:/msys64/mingw64/bin/ffmpeg.exe"),
+        });
+        for (const QString &candidate : candidates) {
+            if (!candidate.isEmpty() && QFileInfo::exists(candidate)) {
+                return QDir::toNativeSeparators(candidate);
+            }
+        }
+        return {};
+    }
+
+    /** Ask for an MP4 path and start an FFmpeg raw-video encoder process. */
+    void startRecording() {
+        if (recording_ || recordingStopping_ ||
+            state_ != State::Streaming || !screen_->hasFrame()) {
+            return;
+        }
+
+        const QString ffmpeg = findFfmpegExecutable();
+        if (ffmpeg.isEmpty()) {
+            QMessageBox::warning(
+                this, QStringLiteral("FFmpeg not found"),
+                QStringLiteral(
+                    "Recording requires ffmpeg.exe. Install the MSYS2 "
+                    "UCRT64 package mingw-w64-ucrt-x86_64-ffmpeg or the "
+                    "MinGW64 package mingw-w64-x86_64-ffmpeg, add FFmpeg "
+                    "to PATH, or place a complete FFmpeg distribution "
+                    "beside the viewer."));
+            return;
+        }
+
+        QString filename = QFileDialog::getSaveFileName(
+            this, QStringLiteral("Record P2000M screen"),
+            QDir::home().filePath(QStringLiteral("p2000m-recording.mp4")),
+            QStringLiteral("MPEG-4 video (*.mp4)"));
+        if (filename.isEmpty()) {
+            return;
+        }
+        if (!filename.endsWith(QStringLiteral(".mp4"),
+                               Qt::CaseInsensitive)) {
+            filename += QStringLiteral(".mp4");
+        }
+
+        ffmpegProcess_.setProgram(ffmpeg);
+        ffmpegProcess_.setArguments({
+            QStringLiteral("-hide_banner"),
+            QStringLiteral("-loglevel"), QStringLiteral("error"),
+            QStringLiteral("-nostdin"), QStringLiteral("-y"),
+            QStringLiteral("-f"), QStringLiteral("rawvideo"),
+            QStringLiteral("-pixel_format"), QStringLiteral("bgra"),
+            QStringLiteral("-video_size"), QStringLiteral("640x480"),
+            QStringLiteral("-framerate"), QStringLiteral("25.047"),
+            QStringLiteral("-i"), QStringLiteral("pipe:0"),
+            QStringLiteral("-an"),
+            QStringLiteral("-c:v"), QStringLiteral("libx264"),
+            QStringLiteral("-preset"), QStringLiteral("veryfast"),
+            QStringLiteral("-crf"), QStringLiteral("18"),
+            QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+            QStringLiteral("-movflags"), QStringLiteral("+faststart"),
+            QDir::toNativeSeparators(filename),
+        });
+        ffmpegProcess_.setProcessChannelMode(QProcess::SeparateChannels);
+        ffmpegProcess_.start(QIODevice::WriteOnly);
+        if (!ffmpegProcess_.waitForStarted(3000)) {
+            QMessageBox::critical(
+                this, QStringLiteral("Unable to start FFmpeg"),
+                QStringLiteral("Could not start %1:\n%2")
+                    .arg(ffmpeg, ffmpegProcess_.errorString()));
+            return;
+        }
+
+        recordingFile_ = filename;
+        recordedFrames_ = 0;
+        recordingDroppedFrames_ = 0;
+        recordingWriteFailed_ = false;
+        recording_ = true;
+        recordingStopping_ = false;
+        recordingClock_.restart();
+        startRecordingAction_->setEnabled(false);
+        stopRecordingAction_->setEnabled(true);
+        statusBar()->showMessage(
+            QStringLiteral("Recording to %1").arg(QFileInfo(filename).fileName()));
+    }
+
+    /** Close FFmpeg input and allow it to finalize the MP4 container. */
+    void stopRecording() {
+        if (!recording_) {
+            return;
+        }
+        recording_ = false;
+        recordingStopping_ = true;
+        stopRecordingAction_->setEnabled(false);
+        ffmpegProcess_.closeWriteChannel();
+        statusBar()->showMessage(QStringLiteral("Finalizing recording…"));
+    }
+
+    /** Feed one complete RGB32 VGA frame to FFmpeg without blocking the UI. */
+    void recordFrame(const QImage &frame) {
+        if (!recording_ ||
+            ffmpegProcess_.state() != QProcess::Running) {
+            return;
+        }
+
+        const qint64 frameBytes =
+            static_cast<qint64>(kSourceWidth) * kVgaHeight * 4;
+        if (frame.format() != QImage::Format_RGB32 ||
+            frame.width() != kSourceWidth || frame.height() != kVgaHeight ||
+            frame.bytesPerLine() != kSourceWidth * 4 ||
+            frame.sizeInBytes() != frameBytes) {
+            recordingWriteFailed_ = true;
+            stopRecording();
+            return;
+        }
+
+        // Bounded buffering keeps a slow encoder from consuming unbounded RAM.
+        // Dropping a whole frame is safe because raw-video frame boundaries
+        // remain intact; FFmpeg simply produces a shorter constant-rate video.
+        if (ffmpegProcess_.bytesToWrite() > frameBytes * 4) {
+            ++recordingDroppedFrames_;
+            return;
+        }
+        const qint64 written = ffmpegProcess_.write(
+            reinterpret_cast<const char *>(frame.constBits()), frameBytes);
+        if (written != frameBytes) {
+            recordingWriteFailed_ = true;
+            stopRecording();
+            return;
+        }
+        ++recordedFrames_;
+    }
+
+    /** Handle normal completion and report FFmpeg diagnostics on failure. */
+    void handleRecordingFinished(int exitCode,
+                                 QProcess::ExitStatus exitStatus) {
+        const bool wasRecording = recording_ || recordingStopping_;
+        const QString diagnostics = QString::fromLocal8Bit(
+            ffmpegProcess_.readAllStandardError()).trimmed();
+        const bool succeeded = wasRecording && !recordingWriteFailed_ &&
+            exitStatus == QProcess::NormalExit && exitCode == 0;
+
+        recording_ = false;
+        recordingStopping_ = false;
+        stopRecordingAction_->setEnabled(false);
+        startRecordingAction_->setEnabled(
+            state_ == State::Streaming && screen_->hasFrame());
+        if (!wasRecording || closing_) {
+            return;
+        }
+        if (succeeded) {
+            statusBar()->showMessage(
+                QStringLiteral("Recording saved: %1")
+                    .arg(QDir::toNativeSeparators(recordingFile_)),
+                8000);
+        } else {
+            QMessageBox::critical(
+                this, QStringLiteral("Recording failed"),
+                diagnostics.isEmpty()
+                    ? QStringLiteral("FFmpeg did not complete the recording.")
+                    : QStringLiteral("FFmpeg reported:\n%1")
+                          .arg(diagnostics));
+        }
+    }
+
+    /** Toggle the frameless presentation view while retaining stream state. */
     void setPresentationMode(bool enabled) {
         menuBar()->setVisible(!enabled);
         statusBar()->setVisible(!enabled);
         controlsWidget_->setVisible(!enabled);
+        statisticsPanel_->setVisible(!enabled);
         if (enabled) {
             showFullScreen();
         } else {
@@ -727,6 +1202,7 @@ private:
         }
     }
 
+    /** Start a fresh enumeration pass when the state machine is idle. */
     void beginDiscovery() {
         if (state_ != State::Disconnected) {
             return;
@@ -748,6 +1224,7 @@ private:
         tryNextCandidate();
     }
 
+    /** Open and identify the next Pico CDC candidate. */
     void tryNextCandidate() {
         serial_.close();
         receiveBuffer_.clear();
@@ -792,6 +1269,7 @@ private:
         scheduleRediscovery();
     }
 
+    /** Schedule a bounded-delay discovery retry when auto-reconnect is active. */
     void scheduleRediscovery() {
         if (autoReconnect_ && !rediscoveryScheduled_) {
             rediscoveryScheduled_ = true;
@@ -804,6 +1282,7 @@ private:
         }
     }
 
+    /** Leave binary streaming and request the current console settings. */
     void beginConfiguration() {
         if (state_ != State::Streaming || !serial_.isOpen()) {
             return;
@@ -820,6 +1299,7 @@ private:
         }
     }
 
+    /** Report a configuration error and return to the selected screen mode. */
     void configurationFailed(const QString &message) {
         state_ = State::Configuring;
         receiveBuffer_.clear();
@@ -828,6 +1308,7 @@ private:
         resumeScreenMode();
     }
 
+    /** Present the configuration dialog and dispatch its selected result. */
     void showConfigurationDialog(const DeviceSettings &current) {
         state_ = State::Configuring;
         ConfigurationDialog dialog(current, this);
@@ -846,6 +1327,7 @@ private:
         }
     }
 
+    /** Translate a settings delta into console commands and resume streaming. */
     void applyDeviceSettings(const DeviceSettings &current,
                              const DeviceSettings &requested,
                              bool save) {
@@ -875,7 +1357,7 @@ private:
         if (save) {
             commands += "save\r\n";
         }
-        commands += "screen\r\n";
+        commands += screenModeCommand();
 
         receiveBuffer_.clear();
         state_ = State::AwaitingScreenMode;
@@ -889,6 +1371,7 @@ private:
         }
     }
 
+    /** Re-enter the selected binary screen mode after console interaction. */
     void resumeScreenMode() {
         if (!serial_.isOpen()) {
             if (state_ != State::Disconnected) {
@@ -902,11 +1385,47 @@ private:
         stateClock_.restart();
         statusBar()->showMessage(
             QStringLiteral("Returning to live screen mode…"));
-        if (!serial_.write(QByteArrayLiteral("screen\r\n"))) {
+        if (!serial_.write(screenModeCommand())) {
             handleConnectionLoss();
         }
     }
 
+    /** Return the console command for the currently selected encoding. */
+    QByteArray screenModeCommand() const {
+        return packBitsRequested_
+                   ? QByteArrayLiteral("screen packbits\r\n")
+                   : QByteArrayLiteral("screen raw\r\n");
+    }
+
+    /** Switch a live stream between raw and opportunistic PackBits records. */
+    void setStreamEncoding(bool packBits) {
+        if (packBitsRequested_ == packBits) {
+            return;
+        }
+        packBitsRequested_ = packBits;
+        updateEncodingGraphVisibility();
+        if (state_ != State::Streaming || !serial_.isOpen()) {
+            statusBar()->showMessage(
+                packBits
+                    ? QStringLiteral(
+                          "PackBits will be used at the next connection")
+                    : QStringLiteral(
+                          "Raw streaming will be used at the next connection"));
+            return;
+        }
+
+        receiveBuffer_.clear();
+        state_ = State::SwitchingEncoding;
+        stateClock_.restart();
+        statusBar()->showMessage(
+            packBits ? QStringLiteral("Switching to PackBits streaming…")
+                     : QStringLiteral("Switching to raw streaming…"));
+        if (!serial_.write(QByteArrayLiteral("console\r\n"))) {
+            handleConnectionLoss();
+        }
+    }
+
+    /** Poll Windows serial input and advance the connection state machine. */
     void serviceConnection() {
         if (!serial_.isOpen()) {
             return;
@@ -918,6 +1437,7 @@ private:
             handleConnectionLoss();
             return;
         }
+        recordReceivedBytes(incoming.size());
         receiveBuffer_.append(incoming);
 
         if (state_ == State::Probing) {
@@ -925,7 +1445,7 @@ private:
                 receiveBuffer_.clear();
                 state_ = State::AwaitingScreenMode;
                 stateClock_.restart();
-                serial_.write(QByteArrayLiteral("screen\r\n"));
+                serial_.write(screenModeCommand());
             } else if (stateClock_.elapsed() > 3000) {
                 tryNextCandidate();
             }
@@ -933,15 +1453,43 @@ private:
         }
 
         if (state_ == State::AwaitingScreenMode) {
-            if (receiveBuffer_.contains("SCREEN mode=binary version=1")) {
-                receiveBuffer_.clear();
+            const qsizetype announcementOffset = receiveBuffer_.indexOf(
+                QByteArrayLiteral("SCREEN mode=binary version=1"));
+            if (announcementOffset >= 0) {
+                const qsizetype lineEnd =
+                    receiveBuffer_.indexOf('\n', announcementOffset);
+                if (lineEnd < 0) {
+                    return;
+                }
+                const QByteArray announcement = receiveBuffer_.mid(
+                    announcementOffset, lineEnd - announcementOffset);
+                continuousScreenMode_ =
+                    announcement.contains("flow=continuous");
+                // Continuous firmware may append the first binary record to
+                // the same Windows read as its text announcement. Preserve it
+                // instead of throwing away the start of that frame.
+                receiveBuffer_.remove(0, lineEnd + 1);
                 state_ = State::Streaming;
                 if (!resumingScreenMode_) {
                     frameCount_ = 0;
                     crcErrors_ = 0;
+                    crcErrorTimes_.clear();
+                    captureClock_.restart();
                 }
                 smoothedFps_ = 0.0;
+                smoothedPayloadBytes_ = 0.0;
+                smoothedRxBytesPerSecond_ = 0.0;
+                rxWindowBytes_ = 0;
+                rxClock_.restart();
+                smoothedRenderMilliseconds_ = 0.0;
+                smoothedDecompressionMilliseconds_ = 0.0;
+                smoothedSequenceStep_ = 0.0;
+                lastSequenceValid_ = false;
+                firmwareTimingAvailable_ = false;
+                smoothedFirmwarePrepareUs_ = 0.0;
+                smoothedFirmwareEncodeUs_ = 0.0;
                 frameClock_.invalidate();
+                clearStatisticsGraphs();
                 connectButton_->setEnabled(false);
                 connectAction_->setEnabled(false);
                 disconnectButton_->setEnabled(true);
@@ -954,6 +1502,7 @@ private:
                         .arg(serial_.name()));
                 resumingScreenMode_ = false;
                 requestFrame();
+                processFrames();
             } else if (stateClock_.elapsed() >
                        (resumingScreenMode_ ? 5000 : 1200)) {
                 if (resumingScreenMode_) {
@@ -981,6 +1530,22 @@ private:
             return;
         }
 
+        if (state_ == State::SwitchingEncoding) {
+            if (receiveBuffer_.contains("Command mode.") &&
+                receiveBuffer_.contains("vid2vga> ")) {
+                receiveBuffer_.clear();
+                state_ = State::AwaitingScreenMode;
+                resumingScreenMode_ = true;
+                stateClock_.restart();
+                if (!serial_.write(screenModeCommand())) {
+                    handleConnectionLoss();
+                }
+            } else if (stateClock_.elapsed() > 2000) {
+                handleConnectionLoss();
+            }
+            return;
+        }
+
         if (state_ == State::QueryingSettings) {
             if (receiveBuffer_.contains("vid2vga> ")) {
                 DeviceSettings settings;
@@ -1003,6 +1568,7 @@ private:
         }
     }
 
+    /** Parse, validate, render, and account for every complete queued record. */
     void processFrames() {
         static const QByteArray magic("P2VF", 4);
         while (true) {
@@ -1025,6 +1591,7 @@ private:
             const quint8 type = static_cast<quint8>(header[5]);
             const quint16 flags = loadU16(header + 6);
             const quint32 sequence = loadU32(header + 8);
+            const quint32 timingDiagnostics = loadU32(header + 12);
             const quint16 width = loadU16(header + 16);
             const quint16 height = loadU16(header + 18);
             const quint16 stride = loadU16(header + 20);
@@ -1036,12 +1603,15 @@ private:
             const quint32 border = loadU32(header + 40);
             const quint32 style = loadU32(header + 44);
 
+            const bool validPayload =
+                (type == 1 && payloadSize == kFramePayloadSize) ||
+                (type == 2 && payloadSize > 0 &&
+                 payloadSize <= kMaximumPackBitsSize);
             const bool validHeader =
-                version == 1 && type == 1 && (flags & 0x3u) == 0x3u &&
+                version == 1 && validPayload && (flags & 0x3u) == 0x3u &&
                 width == kSourceWidth && height == kSourceHeight &&
                 stride == kSourceWidth / 8 &&
-                headerSize == kFrameHeaderSize &&
-                payloadSize == kFramePayloadSize;
+                headerSize == kFrameHeaderSize;
             if (!validHeader) {
                 receiveBuffer_.remove(0, 1);
                 continue;
@@ -1052,11 +1622,41 @@ private:
                 return;
             }
 
-            const QByteArray payload = receiveBuffer_.mid(
+            const QByteArray encodedPayload = receiveBuffer_.mid(
                 headerSize, static_cast<qsizetype>(payloadSize));
             receiveBuffer_.remove(0, recordSize);
+            QByteArray payload;
+            if (type == 1) {
+                payload = encodedPayload;
+            } else {
+                QElapsedTimer decompressionTimer;
+                decompressionTimer.start();
+                payload.resize(kFramePayloadSize);
+                if (!p2000m_packbits_decode(
+                        reinterpret_cast<const uint8_t *>(
+                            encodedPayload.constData()),
+                        static_cast<size_t>(encodedPayload.size()),
+                        reinterpret_cast<uint8_t *>(payload.data()),
+                        static_cast<size_t>(payload.size()))) {
+                    recordCrcError();
+                    statusBar()->showMessage(
+                        QStringLiteral(
+                            "Discarded frame %1: invalid PackBits data")
+                            .arg(sequence));
+                    requestFrame();
+                    continue;
+                }
+                const double milliseconds =
+                    static_cast<double>(decompressionTimer.nsecsElapsed()) /
+                    1000000.0;
+                smoothedDecompressionMilliseconds_ =
+                    smoothedDecompressionMilliseconds_ == 0.0
+                        ? milliseconds
+                        : smoothedDecompressionMilliseconds_ * 0.85 +
+                              milliseconds * 0.15;
+            }
             if (crc32(payload) != expectedCrc) {
-                ++crcErrors_;
+                recordCrcError();
                 statusBar()->showMessage(
                     QStringLiteral("Discarded frame %1: CRC mismatch")
                         .arg(sequence));
@@ -1067,10 +1667,51 @@ private:
             // Grant the next frame before doing GUI-side pixel expansion so
             // USB and rendering overlap instead of adding their latencies.
             requestFrame();
-            screen_->setFrame(renderFrame(payload, foreground, background,
-                                          border, style));
+            QElapsedTimer renderTimer;
+            renderTimer.start();
+            QImage rendered = renderFrame(payload, foreground, background,
+                                          border, style);
+            const double renderMilliseconds =
+                static_cast<double>(renderTimer.nsecsElapsed()) / 1000000.0;
+            smoothedRenderMilliseconds_ =
+                smoothedRenderMilliseconds_ == 0.0
+                    ? renderMilliseconds
+                    : smoothedRenderMilliseconds_ * 0.85 +
+                          renderMilliseconds * 0.15;
+            recordFrame(rendered);
+            screen_->setFrame(std::move(rendered));
             screenshotAction_->setEnabled(true);
+            startRecordingAction_->setEnabled(!recording_ &&
+                                               !recordingStopping_);
             ++frameCount_;
+            if (lastSequenceValid_) {
+                const quint32 step = sequence - lastSequence_;
+                smoothedSequenceStep_ = smoothedSequenceStep_ == 0.0
+                                            ? step
+                                            : smoothedSequenceStep_ * 0.85 +
+                                                  step * 0.15;
+            }
+            lastSequence_ = sequence;
+            lastSequenceValid_ = true;
+            if ((flags & 0x4u) != 0u) {
+                const double prepareUs = timingDiagnostics & 0xffffu;
+                const double encodeUs = timingDiagnostics >> 16u;
+                smoothedFirmwarePrepareUs_ =
+                    smoothedFirmwarePrepareUs_ == 0.0
+                        ? prepareUs
+                        : smoothedFirmwarePrepareUs_ * 0.85 +
+                              prepareUs * 0.15;
+                smoothedFirmwareEncodeUs_ =
+                    smoothedFirmwareEncodeUs_ == 0.0
+                        ? encodeUs
+                        : smoothedFirmwareEncodeUs_ * 0.85 +
+                              encodeUs * 0.15;
+                firmwareTimingAvailable_ = true;
+            }
+            smoothedPayloadBytes_ = smoothedPayloadBytes_ == 0.0
+                                        ? payloadSize
+                                        : smoothedPayloadBytes_ * 0.85 +
+                                              payloadSize * 0.15;
             if (frameClock_.isValid()) {
                 const qint64 elapsed = frameClock_.restart();
                 if (elapsed > 0) {
@@ -1083,15 +1724,173 @@ private:
             } else {
                 frameClock_.start();
             }
-            statusBar()->showMessage(
-                QStringLiteral("%1  •  frame %2  •  %3 fps  •  CRC errors %4")
-                    .arg(serial_.name())
-                    .arg(sequence)
-                    .arg(smoothedFps_, 0, 'f', 1)
-                    .arg(crcErrors_));
+            const double savedPercent = std::max(
+                0.0, 100.0 *
+                         (1.0 - smoothedPayloadBytes_ / kFramePayloadSize));
+            updateStatisticsGraphs(type, savedPercent);
+            updateStreamingStatus(sequence);
         }
     }
 
+    /** Clear every graph when beginning a newly negotiated stream. */
+    void clearStatisticsGraphs() {
+        const std::array<MetricGraphWidget *, 11> graphs = {
+            usbGraph_, frameRateGraph_, sourceStepGraph_, payloadGraph_,
+            renderGraph_, unpackGraph_, paintRateGraph_, paintTimeGraph_,
+            firmwarePrepareGraph_, firmwareEncodeGraph_, crcGraph_,
+        };
+        for (MetricGraphWidget *graph : graphs) {
+            graph->clear();
+        }
+    }
+
+    /** Show compression metrics only while PackBits mode is selected. */
+    void updateEncodingGraphVisibility() {
+        payloadGraph_->setVisible(packBitsRequested_);
+        unpackGraph_->setVisible(packBitsRequested_);
+        firmwareEncodeGraph_->setVisible(packBitsRequested_);
+    }
+
+    /** Record one integrity failure for total and rolling-rate metrics. */
+    void recordCrcError() {
+        ++crcErrors_;
+        if (!captureClock_.isValid()) {
+            captureClock_.start();
+        }
+        crcErrorTimes_.push_back(captureClock_.elapsed());
+    }
+
+    /** Return the CRC-error rate over at most the latest 60 seconds. */
+    double crcErrorsPerMinute() {
+        if (!captureClock_.isValid()) {
+            return 0.0;
+        }
+        const qint64 now = captureClock_.elapsed();
+        constexpr qint64 windowMilliseconds = 60000;
+        while (!crcErrorTimes_.empty() &&
+               crcErrorTimes_.front() <= now - windowMilliseconds) {
+            crcErrorTimes_.pop_front();
+        }
+        const qint64 observedMilliseconds =
+            std::clamp<qint64>(now, 1000, windowMilliseconds);
+        return static_cast<double>(crcErrorTimes_.size()) *
+               windowMilliseconds / observedMilliseconds;
+    }
+
+    /** Publish all smoothed transport, viewer, and firmware measurements. */
+    void updateStatisticsGraphs(quint8 payloadType, double savedPercent) {
+        updateEncodingGraphVisibility();
+        usbGraph_->setSample(
+            smoothedRxBytesPerSecond_ / 1024.0,
+            QStringLiteral("%1 KiB/s")
+                .arg(smoothedRxBytesPerSecond_ / 1024.0, 0, 'f', 1));
+        frameRateGraph_->setSample(
+            smoothedFps_,
+            QStringLiteral("%1 FPS").arg(smoothedFps_, 0, 'f', 1));
+        sourceStepGraph_->setSample(
+            smoothedSequenceStep_,
+            lastSequenceValid_ && frameCount_ > 1
+                ? QStringLiteral("%1 source frames")
+                      .arg(smoothedSequenceStep_, 0, 'f', 2)
+                : QStringLiteral("Waiting for next frame"),
+            lastSequenceValid_ && frameCount_ > 1);
+        if (packBitsRequested_) {
+            payloadGraph_->setSample(
+                smoothedPayloadBytes_ / 1024.0,
+                QStringLiteral("%1 KiB · %2% saved")
+                    .arg(smoothedPayloadBytes_ / 1024.0, 0, 'f', 1)
+                    .arg(savedPercent, 0, 'f', 0));
+        }
+        renderGraph_->setSample(
+            smoothedRenderMilliseconds_,
+            QStringLiteral("%1 ms")
+                .arg(smoothedRenderMilliseconds_, 0, 'f', 2));
+        if (packBitsRequested_) {
+            unpackGraph_->setSample(
+                payloadType == 2 ? smoothedDecompressionMilliseconds_ : 0.0,
+                payloadType == 2
+                    ? QStringLiteral("%1 ms")
+                          .arg(smoothedDecompressionMilliseconds_, 0, 'f', 2)
+                    : QStringLiteral("Raw fallback · not required"));
+        }
+        paintRateGraph_->setSample(
+            screen_->paintFps(),
+            QStringLiteral("%1 FPS").arg(screen_->paintFps(), 0, 'f', 1));
+        paintTimeGraph_->setSample(
+            screen_->paintMilliseconds(),
+            QStringLiteral("%1 ms")
+                .arg(screen_->paintMilliseconds(), 0, 'f', 2));
+        firmwarePrepareGraph_->setSample(
+            smoothedFirmwarePrepareUs_ / 1000.0,
+            firmwareTimingAvailable_
+                ? QStringLiteral("%1 ms")
+                      .arg(smoothedFirmwarePrepareUs_ / 1000.0, 0, 'f', 2)
+                : QStringLiteral("Not provided by firmware"),
+            firmwareTimingAvailable_);
+        if (packBitsRequested_) {
+            firmwareEncodeGraph_->setSample(
+                smoothedFirmwareEncodeUs_ / 1000.0,
+                firmwareTimingAvailable_
+                    ? QStringLiteral("%1 ms")
+                          .arg(smoothedFirmwareEncodeUs_ / 1000.0, 0, 'f', 2)
+                    : QStringLiteral("Not provided by firmware"),
+                firmwareTimingAvailable_);
+        }
+        const double errorsPerMinute = crcErrorsPerMinute();
+        crcGraph_->setSample(
+            errorsPerMinute,
+            QStringLiteral("%1 errors/min")
+                .arg(errorsPerMinute, 0, 'f', 2));
+    }
+
+    /** Show only connection, source-frame, and recording state in the bar. */
+    void updateStreamingStatus(quint32 sequence) {
+        QString message = QStringLiteral("%1  •  frame %2  •  CRC errors %3")
+                              .arg(serial_.name())
+                              .arg(sequence)
+                              .arg(crcErrors_);
+        if (recording_) {
+            const qint64 elapsedSeconds = recordingClock_.elapsed() / 1000;
+            message += QStringLiteral("  •  recording %1:%2 · %3 frames")
+                           .arg(elapsedSeconds / 60, 2, 10,
+                                QLatin1Char('0'))
+                           .arg(elapsedSeconds % 60, 2, 10,
+                                QLatin1Char('0'))
+                           .arg(recordedFrames_);
+            if (recordingDroppedFrames_ != 0) {
+                message += QStringLiteral(" · %1 dropped")
+                               .arg(recordingDroppedFrames_);
+            }
+        } else if (recordingStopping_) {
+            message += QStringLiteral("  •  finalizing recording");
+        }
+        statusBar()->showMessage(message);
+    }
+
+    /** Add one Windows read to the smoothed USB-throughput measurement. */
+    void recordReceivedBytes(qsizetype count) {
+        if (count <= 0) {
+            return;
+        }
+        if (!rxClock_.isValid()) {
+            rxClock_.start();
+        }
+        rxWindowBytes_ += static_cast<quint64>(count);
+        const qint64 elapsed = rxClock_.elapsed();
+        if (elapsed < 500) {
+            return;
+        }
+        const double instantaneous =
+            static_cast<double>(rxWindowBytes_) * 1000.0 / elapsed;
+        smoothedRxBytesPerSecond_ = smoothedRxBytesPerSecond_ == 0.0
+                                        ? instantaneous
+                                        : smoothedRxBytesPerSecond_ * 0.7 +
+                                              instantaneous * 0.3;
+        rxWindowBytes_ = 0;
+        rxClock_.restart();
+    }
+
+    /** Reconstruct the exact 640 x 480 VGA view from a packed source frame. */
     QImage renderFrame(const QByteArray &payload, quint32 foreground,
                        quint32 background, quint32 border,
                        quint32 style) const {
@@ -1178,15 +1977,21 @@ private:
         return image;
     }
 
+    /** Grant one frame only when connected to legacy credit-based firmware. */
     void requestFrame() {
-        if (state_ == State::Streaming &&
+        if (state_ == State::Streaming && !continuousScreenMode_ &&
             !serial_.write(QByteArrayLiteral("frame\r\n"))) {
             handleConnectionLoss();
         }
     }
 
+    /** Return the adapter to console mode and close the COM port. */
     void disconnectFromAdapter(bool userRequested) {
         autoReconnect_ = !userRequested;
+        if (recording_) {
+            stopRecording();
+        }
+        startRecordingAction_->setEnabled(false);
         if (serial_.isOpen()) {
             state_ = State::Disconnecting;
             serial_.write(QByteArrayLiteral("console\r\n"));
@@ -1205,7 +2010,12 @@ private:
         }
     }
 
+    /** Reset connection controls after an I/O failure and schedule discovery. */
     void handleConnectionLoss() {
+        if (recording_) {
+            stopRecording();
+        }
+        startRecordingAction_->setEnabled(false);
         serial_.close();
         state_ = State::Disconnected;
         connectButton_->setEnabled(true);
@@ -1219,40 +2029,149 @@ private:
         scheduleRediscovery();
     }
 
+    /** Central VGA presentation widget. */
     ScreenWidget *screen_ = nullptr;
+    /** Bottom-row controls hidden in full-screen presentation mode. */
     QWidget *controlsWidget_ = nullptr;
+    /** Scrollable collection of live performance-history graphs. */
+    QWidget *statisticsPanel_ = nullptr;
+    /** Windows-side USB receive throughput graph. */
+    MetricGraphWidget *usbGraph_ = nullptr;
+    /** Validated frame-arrival rate graph. */
+    MetricGraphWidget *frameRateGraph_ = nullptr;
+    /** Captured source-frame sequence increment graph. */
+    MetricGraphWidget *sourceStepGraph_ = nullptr;
+    /** Encoded frame payload-size graph. */
+    MetricGraphWidget *payloadGraph_ = nullptr;
+    /** Framebuffer-to-QImage conversion-duration graph. */
+    MetricGraphWidget *renderGraph_ = nullptr;
+    /** Optional PackBits expansion-duration graph. */
+    MetricGraphWidget *unpackGraph_ = nullptr;
+    /** Unique-frame presentation-rate graph. */
+    MetricGraphWidget *paintRateGraph_ = nullptr;
+    /** Screen-widget painting-duration graph. */
+    MetricGraphWidget *paintTimeGraph_ = nullptr;
+    /** Firmware frame-preparation-duration graph. */
+    MetricGraphWidget *firmwarePrepareGraph_ = nullptr;
+    /** Firmware PackBits-duration graph. */
+    MetricGraphWidget *firmwareEncodeGraph_ = nullptr;
+    /** Accumulated invalid-record count graph. */
+    MetricGraphWidget *crcGraph_ = nullptr;
+    /** Human-readable connection state. */
     QLabel *connectionLabel_ = nullptr;
+    /** Manual discovery button. */
     QPushButton *connectButton_ = nullptr;
+    /** User-requested disconnect button. */
     QPushButton *disconnectButton_ = nullptr;
+    /** Menu equivalent of connectButton_. */
     QAction *connectAction_ = nullptr;
+    /** Menu equivalent of disconnectButton_. */
     QAction *disconnectAction_ = nullptr;
+    /** Opens the firmware-backed settings dialog. */
     QAction *configureAction_ = nullptr;
+    /** Saves the latest reconstructed frame. */
     QAction *screenshotAction_ = nullptr;
+    /** Starts an FFmpeg-backed MP4 recording. */
+    QAction *startRecordingAction_ = nullptr;
+    /** Stops and finalizes the current recording. */
+    QAction *stopRecordingAction_ = nullptr;
+    /** Tracks and toggles presentation mode. */
     QAction *fullScreenAction_ = nullptr;
+    /** One-millisecond serial polling timer. */
     QTimer pollTimer_;
+    /** Timeout clock for the active protocol state. */
     QElapsedTimer stateClock_;
+    /** Interval clock for validated frame arrivals. */
     QElapsedTimer frameClock_;
+    /** Accumulation clock for Windows-received byte throughput. */
+    QElapsedTimer rxClock_;
+    /** Elapsed capture time used for the rolling CRC-error rate. */
+    QElapsedTimer captureClock_;
+    /** External encoder process receiving raw VGA frames. */
+    QProcess ffmpegProcess_;
+    /** Elapsed wall clock displayed while recording. */
+    QElapsedTimer recordingClock_;
+    /** Destination selected for the current or most recent recording. */
+    QString recordingFile_;
+    /** Native serial-port owner. */
     WindowsSerialPort serial_;
+    /** Pico CDC candidates found during the current discovery pass. */
     QStringList candidates_;
+    /** Candidates which another application prevented us from opening. */
     QStringList unavailableCandidates_;
+    /** Next element of candidates_ to probe. */
     qsizetype candidateIndex_ = 0;
+    /** Number of ports successfully opened during the current pass. */
     int probedCandidateCount_ = 0;
+    /** Mixed text/binary receive accumulator consumed by the active state. */
     QByteArray receiveBuffer_;
+    /** Current connection and protocol phase. */
     State state_ = State::Disconnected;
+    /** Whether loss or failed discovery should schedule another pass. */
     bool autoReconnect_ = true;
+    /** Prevents more than one queued rediscovery callback. */
     bool rediscoveryScheduled_ = false;
+    /** Distinguishes stream resumption from initial connection accounting. */
     bool resumingScreenMode_ = false;
+    /** Whether firmware sends continuously without FRAME credits. */
+    bool continuousScreenMode_ = false;
+    /** User-selected PackBits preference for this and future connections. */
+    bool packBitsRequested_ = false;
+    /** Whether lastSequence_ contains a validated source sequence. */
+    bool lastSequenceValid_ = false;
+    /** Whether protocol flag bit 2 supplied firmware timing fields. */
+    bool firmwareTimingAvailable_ = false;
+    /** Whether new reconstructed frames should be sent to FFmpeg. */
+    bool recording_ = false;
+    /** Whether FFmpeg is flushing and finalizing its output container. */
+    bool recordingStopping_ = false;
+    /** Whether frame delivery failed before FFmpeg exited. */
+    bool recordingWriteFailed_ = false;
+    /** Suppresses recording dialogs while the main window is closing. */
+    bool closing_ = false;
+    /** Smoothed validated-record arrival rate. */
     double smoothedFps_ = 0.0;
+    /** Smoothed transmitted payload bytes per complete frame. */
+    double smoothedPayloadBytes_ = 0.0;
+    /** Smoothed Windows-received bytes per second. */
+    double smoothedRxBytesPerSecond_ = 0.0;
+    /** Smoothed packed-frame-to-QImage conversion duration. */
+    double smoothedRenderMilliseconds_ = 0.0;
+    /** Smoothed PackBits expansion duration. */
+    double smoothedDecompressionMilliseconds_ = 0.0;
+    /** Smoothed difference between consecutive source sequence numbers. */
+    double smoothedSequenceStep_ = 0.0;
+    /** Smoothed firmware header-preparation time in microseconds. */
+    double smoothedFirmwarePrepareUs_ = 0.0;
+    /** Smoothed firmware PackBits encoding time in microseconds. */
+    double smoothedFirmwareEncodeUs_ = 0.0;
+    /** Bytes accumulated in the current throughput window. */
+    quint64 rxWindowBytes_ = 0;
+    /** Source sequence of the most recently validated frame. */
+    quint32 lastSequence_ = 0;
+    /** Number of validated frames received during this connection history. */
     quint64 frameCount_ = 0;
+    /** Number of structurally invalid or CRC-mismatched records. */
     quint64 crcErrors_ = 0;
+    /** Capture-relative timestamps of CRC errors in the rolling window. */
+    std::deque<qint64> crcErrorTimes_;
+    /** Complete VGA frames accepted by FFmpeg during this recording. */
+    quint64 recordedFrames_ = 0;
+    /** Frames skipped to keep the encoder's pending buffer bounded. */
+    quint64 recordingDroppedFrames_ = 0;
 };
 
 }  // namespace
 
+/** Initialize Qt application metadata and run the viewer event loop. */
 int main(int argc, char *argv[]) {
     QApplication application(argc, argv);
     QApplication::setApplicationName(QStringLiteral("P2000M VID2VGA Viewer"));
+    QApplication::setApplicationVersion(
+        QStringLiteral(P2000M_VIEWER_VERSION));
     QApplication::setOrganizationName(QStringLiteral("P2000M VID2VGA"));
+    QApplication::setWindowIcon(QIcon(QStringLiteral(
+        ":/icons/p2000m-vid2vga-viewer.png")));
 
     MainWindow window;
     window.show();

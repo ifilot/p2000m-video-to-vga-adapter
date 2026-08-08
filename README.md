@@ -75,6 +75,18 @@ Flash the single generated image:
 build/src/p2000m-vid2vga-firmware.uf2
 ```
 
+> [!WARNING]
+> The current experimental firmware runs the RP2350 at 252 MHz and 1.30 V,
+> beyond Raspberry Pi's 150 MHz rating. This preserves exact integer divisors
+> for the 63 MHz capture and 25.2 MHz VGA clocks, but stability, temperature,
+> lifetime, and operation across devices are not guaranteed. BOOTSEL recovery
+> remains available if the firmware does not start reliably. The configuration
+> that sustained 25 FPS was tested with a cooling block fitted directly to the
+> RP2350 package. A properly mounted heatsink or equivalent cooling block, with
+> adequate surrounding airflow, is strongly recommended for prolonged use at
+> 252 MHz; cooling reduces thermal risk but does not make the overclock an
+> in-spec operating condition.
+
 ### Windows screen viewer
 
 The `gui` directory contains a Qt 6 application for Windows. It automatically
@@ -83,6 +95,10 @@ adapter into binary screen mode, and displays complete CRC-checked frames. It
 returns the adapter to console mode when Disconnect is selected or the window
 is closed. Its Adapter menu can configure colors, borders, scaling, sampling
 phase, and optional persistent storage through the firmware's console.
+The viewer uses a monitor-derived application icon, places rolling live
+performance graphs beside the screen, and keeps the status bar focused on the
+COM port and source frame number. It can save lossless screenshots and can
+record H.264 MP4 video through an optional external `ffmpeg.exe`.
 
 Build it from an MSYS2 UCRT64 shell with Qt 6 installed:
 
@@ -216,9 +232,11 @@ unsolicited statistics.
   location.
 - `log`: stream those statistics every two seconds. Press Enter, Escape, or
   `q` to stop the stream and return to the command prompt.
-- `screen`: enter the host-paced binary framebuffer interface used by the
-  Windows viewer. In that mode `frame` grants one frame of transmit credit and
-  `console` returns to the normal terminal interface.
+- `screen [raw|packbits]`: enter the continuous binary framebuffer interface
+  used by the Windows viewer. TinyUSB backpressure safely pauses transmission
+  when the host cannot keep up, `console` returns to the normal terminal
+  interface, and the legacy `frame` command remains accepted for viewer
+  compatibility. Omitting the encoding selects raw records.
 - `settings`: print all active settings and whether they are factory defaults,
   modified in RAM, or saved in flash.
 - `border on`, `border off`, or `border toggle`: control a one-pixel rectangle
@@ -260,11 +278,27 @@ Automatic tuning runs about once every five seconds. The `stale_replaced`
 counter normally increases when newer raw frames supersede frames that no
 consumer needed; it is not itself a capture failure.
 
-Screen mode sends a 48-byte versioned header followed by the native 23,040-byte
-packed monochrome framebuffer. Frames are independently CRC-checked and limited
-to every second decoded source sequence (approximately 25.05 frames per second).
-USB transmission is best effort: a slow or disconnected host can reduce the
-viewer rate but cannot take the framebuffer currently required by VGA output.
+Screen mode sends a 48-byte versioned header followed by a complete packed
+monochrome framebuffer. Type-one records contain the native 23,040-byte image.
+Type-two records use standard PackBits controls: 0 through 127 introduce 1
+through 128 literal bytes, 129 through 255 repeat the next byte 128 through 2
+times, and 128 is a no-op. PackBits is selected independently for each frame
+only when smaller than raw data, so incompressible screens cannot expand the
+USB traffic. PackBits runs are aggregated into approximately 1 KiB staging
+blocks before entering TinyUSB. The payload-size header field describes the
+transmitted data and its CRC-32 always covers the reconstructed 23,040-byte
+framebuffer. When flags bit 2 is set, header bytes 12 through 15 contain two
+little-endian 16-bit diagnostics: current preparation time and previous-frame
+streaming-encoder CPU time, both in microseconds.
+
+Frames are independently recoverable and limited to every second decoded
+source sequence (approximately 25.05 frames per second).
+USB transmission is continuous and best effort: a slow or disconnected host
+can reduce the viewer rate but cannot take the framebuffer currently required
+by VGA output. The current viewer selects raw records by default and offers
+PackBits as an experimental Adapter-menu option. It also negotiates the older
+per-frame credit mode when connected to an earlier compatible firmware build.
+Plain `screen` remains raw for older viewer compatibility.
 
 ## Licensing
 

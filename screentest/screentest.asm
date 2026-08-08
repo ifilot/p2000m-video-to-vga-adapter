@@ -4,14 +4,14 @@
 ; P2000M cartridge screen test
 ;
 ; The P2000M maps its 2 KiB character RAM at 0x5000 and its 2 KiB
-; attribute RAM at 0x5800.  The first 80 * 24 character locations are
-; visible.  This program clears every attribute and draws a row/column ruler
+; attribute RAM at 0x5800. The first 80 * 24 character locations are
+; visible. This program clears every attribute and draws a row/column ruler
 ; that makes missing, duplicated, or shifted screen data easy to recognize.
 
     org 0x1000
 
     ; P2000 cartridge header: signature, byte count, checksum, and the
-    ; 11-byte cartridge label.  The build-time signing script replaces the
+    ; 11-byte cartridge label. The build-time signing script replaces the
     ; zero placeholders with a count and checksum covering the first 8 KiB.
     db 0x5e, 0x00, 0x00, 0x00, 0x00
     db "SCREEN TEST"
@@ -35,7 +35,7 @@ start:
     ld (0x6217),hl
     ei
 
-    ; Clear all 2 KiB of attribute RAM.  Attribute bits 0-3 select graphic,
+    ; Clear all 2 KiB of attribute RAM. Attribute bits 0-3 select graphic,
     ; underline, blinking, and inverse video; zero selects ordinary text.
     xor a
     ld hl,0x5800
@@ -49,13 +49,13 @@ start:
     ; 00|.......10........20........30........40........50........60........70.......|
     ; 01|+++++++10++++++++20++++++++30++++++++40++++++++50++++++++60++++++++70+++++++|
     ;
-    ; The first number is the row (00-23).  The other numbers start at their
-    ; corresponding columns.  Alternating filler distinguishes adjacent rows.
+    ; The first number is the row (00-23). The other numbers start at their
+    ; corresponding columns. Alternating filler distinguishes adjacent rows.
     ld hl,0x5000
     ld b,0
 
 row_loop:
-    ; Convert the binary row number in B to two decimal digits.  D temporarily
+    ; Convert the binary row number in B to two decimal digits. D temporarily
     ; holds the units digit.
     ld a,b
     cp 20
@@ -106,7 +106,7 @@ fill_block:
     dec c
     jr nz,fill_block
 
-    ; Write markers 10 through 70.  Every marker plus eight filler characters
+    ; Write markers 10 through 70. Every marker plus eight filler characters
     ; is exactly ten columns wide, so each marker is aligned to its value.
     ld d,'1'
 
@@ -143,7 +143,7 @@ fill_column:
     jr nz,row_loop
 
     ; The final 128 character-RAM locations are outside the visible 80 * 24
-    ; area.  Initialize them to spaces so the complete 2 KiB plane is known.
+    ; area. Initialize them to spaces so the complete 2 KiB plane is known.
     ld a,' '
     ld b,128
 
@@ -181,7 +181,7 @@ clear_unused:
     ldir
 
     ; Scroll the adapter name from right to left through the 16-character
-    ; interior of the box.  The next source character is tracked in RAM so
+    ; interior of the box. The next source character is tracked in RAM so
     ; monitor interrupts cannot disturb it.
 
 marquee_loop:
@@ -191,7 +191,7 @@ marquee_loop:
     ld bc,15
     ldir
 
-    ; Insert the next character at the right edge.  The sentinel restarts the
+    ; Insert the next character at the right edge. The sentinel restarts the
     ; stream after the four-space gap following the title.
     ld hl,(0x6217)
     ld a,(hl)
@@ -205,7 +205,7 @@ marquee_character_ready:
     inc hl
     ld (0x6217),hl
 
-    ; Busy-wait long enough for each frame to remain visible.  Video-memory
+    ; Busy-wait long enough for each frame to remain visible. Video-memory
     ; contention can vary the precise rate slightly on the real machine.
     ld b,150
 
@@ -247,6 +247,7 @@ timer_store_remainder:
     ld (0x6212),hl
     ret
 
+; Advance the stored HH:MM:SS time by one second with decimal rollover.
 increment_elapsed_time:
     ld a,(0x6214)
     inc a

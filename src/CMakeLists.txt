@@ -29,6 +29,7 @@ target_link_libraries(${FIRMWARE_TARGET} PRIVATE
     hardware_dma
     hardware_flash
     hardware_pio
+    hardware_vreg
 )
 
 target_compile_definitions(${FIRMWARE_TARGET} PRIVATE

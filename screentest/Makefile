@@ -3,6 +3,8 @@
 
 ASSEMBLER ?= z80asm
 PYTHON ?= python3
+
+# Intermediate and final cartridge-image names used by the build rules.
 TARGET := screentest.bin
 UNSIGNED := screentest.unsigned.bin
 SOURCE := screentest.asm

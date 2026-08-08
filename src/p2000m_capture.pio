@@ -10,7 +10,7 @@
 ;   IN base + 2  VSYNC_IN  vertical synchronization
 ;
 ; Clock and packing contract:
-;   - State-machine clock: 63 MHz (126 MHz system clock divided by two).
+;   - State-machine clock: 63 MHz (252 MHz system clock divided by four).
 ;   - Autopush threshold: 28 bits, shift-left/MSB-first.
 ;   - Every sample group executes 14 IN instructions and one JMP instruction.
 ;   - Two groups therefore produce one word containing 28 useful samples over
