@@ -10,16 +10,30 @@
 
     org 0x1000
 
-    ; P2000 cartridge header: signature, zero-length checksum, and the
-    ; 11-byte cartridge label.  A zero byte count and checksum are accepted
-    ; by the monitor, which starts execution at address 0x1010.
+    ; P2000 cartridge header: signature, byte count, checksum, and the
+    ; 11-byte cartridge label.  The build-time signing script replaces the
+    ; zero placeholders with a count and checksum covering the first 8 KiB.
     db 0x5e, 0x00, 0x00, 0x00, 0x00
     db "SCREEN TEST"
 
     jp start
 
 start:
+    ; Start the elapsed timer from the monitor's 50 Hz clock at 0x6010.
+    ; Timer state and the marquee pointer live in application RAM above the
+    ; monitor stack, which grows down from 0x6200.
     di
+    ld hl,(0x6010)
+    ld (0x6210),hl
+    xor a
+    ld (0x6212),a
+    ld (0x6213),a
+    ld (0x6214),a
+    ld (0x6215),a
+    ld (0x6216),a
+    ld hl,marquee_text
+    ld (0x6217),hl
+    ei
 
     ; Clear all 2 KiB of attribute RAM.  Attribute bits 0-3 select graphic,
     ; underline, blinking, and inverse video; zero selects ordinary text.
@@ -152,22 +166,44 @@ clear_unused:
     ld bc,box_bottom_end - box_bottom
     ldir
 
-    ; Animate a spinner in row 11, column 50, just to the right of the box.
-    ; Appendix D of the P2000 T&M System Reference Manual maps 0x5c to the
-    ; fraction 1/2, not backslash, so use only known P2000 glyphs here.
-    ld hl,0x53a2
-    ld de,spinner_frames
+    ; Draw the elapsed-time box on rows 15-17, centred in columns 34-45.
+    ld hl,timer_box_top
+    ld de,0x54d2
+    ld bc,timer_box_top_end - timer_box_top
+    ldir
+    ld hl,timer_box_middle
+    ld de,0x5522
+    ld bc,timer_box_middle_end - timer_box_middle
+    ldir
+    ld hl,timer_box_bottom
+    ld de,0x5572
+    ld bc,timer_box_bottom_end - timer_box_bottom
+    ldir
 
-spinner_loop:
-    ld a,(de)
+    ; Scroll the adapter name from right to left through the 16-character
+    ; interior of the box.  The next source character is tracked in RAM so
+    ; monitor interrupts cannot disturb it.
+
+marquee_loop:
+    ; Shift the interior one position left without touching either '|'.
+    ld hl,0x5391
+    ld de,0x5390
+    ld bc,15
+    ldir
+
+    ; Insert the next character at the right edge.  The sentinel restarts the
+    ; stream after the four-space gap following the title.
+    ld hl,(0x6217)
+    ld a,(hl)
     cp 0xff
-    jr nz,spinner_ready
-    ld de,spinner_frames
-    ld a,(de)
+    jr nz,marquee_character_ready
+    ld hl,marquee_text
+    ld a,(hl)
 
-spinner_ready:
-    ld (hl),a
-    inc de
+marquee_character_ready:
+    ld (0x539f),a
+    inc hl
+    ld (0x6217),hl
 
     ; Busy-wait long enough for each frame to remain visible.  Video-memory
     ; contention can vary the precise rate slightly on the real machine.
@@ -180,22 +216,125 @@ delay_inner:
     dec c
     jr nz,delay_inner
     djnz delay_outer
-    jr spinner_loop
+    call update_timer
+    jr marquee_loop
+
+; Accumulate ticks from the monitor's 50 Hz clock.  Subtraction naturally
+; handles wraparound of the 16-bit system counter.
+update_timer:
+    di
+    ld hl,(0x6010)
+    ei
+    ld de,(0x6210)
+    ld (0x6210),hl
+    or a
+    sbc hl,de
+    ld de,(0x6212)
+    add hl,de
+
+timer_second_check:
+    ld de,50
+    or a
+    sbc hl,de
+    jr c,timer_store_remainder
+    push hl
+    call increment_elapsed_time
+    pop hl
+    jr timer_second_check
+
+timer_store_remainder:
+    add hl,de
+    ld (0x6212),hl
+    ret
+
+increment_elapsed_time:
+    ld a,(0x6214)
+    inc a
+    cp 60
+    jr c,timer_store_seconds
+    xor a
+    ld (0x6214),a
+
+    ld a,(0x6215)
+    inc a
+    cp 60
+    jr c,timer_store_minutes
+    xor a
+    ld (0x6215),a
+
+    ld a,(0x6216)
+    inc a
+    cp 100
+    jr c,timer_store_hours
+    xor a
+
+timer_store_hours:
+    ld (0x6216),a
+    jr render_timer
+
+timer_store_minutes:
+    ld (0x6215),a
+    jr render_timer
+
+timer_store_seconds:
+    ld (0x6214),a
+
+render_timer:
+    ld a,(0x6216)
+    ld hl,0x5524
+    call write_two_digits
+    ld a,(0x6215)
+    ld hl,0x5527
+    call write_two_digits
+    ld a,(0x6214)
+    ld hl,0x552a
+    call write_two_digits
+    ret
+
+; Write A as a zero-padded decimal value in the range 00-99.
+write_two_digits:
+    ld b,'0'
+
+write_tens:
+    cp 10
+    jr c,write_units
+    sub 10
+    inc b
+    jr write_tens
+
+write_units:
+    ld (hl),b
+    inc hl
+    add a,'0'
+    ld (hl),a
+    ret
 
 box_top:
     db "+----------------+"
 box_top_end:
 
 box_middle:
-    db "| P2000M VID2VGA |"
+    db "|                |"
 box_middle_end:
 
 box_bottom:
     db "+----------------+"
 box_bottom_end:
 
-spinner_frames:
-    db '|', '/', '-', 0xff
+timer_box_top:
+    db "+----------+"
+timer_box_top_end:
+
+timer_box_middle:
+    db "| 00:00:00 |"
+timer_box_middle_end:
+
+timer_box_bottom:
+    db "+----------+"
+timer_box_bottom_end:
+
+marquee_text:
+    db "P2000M VID2VGA    ", 0xff
 
     ; Emit a complete 16 KiB SLOT1 image; unused ROM bytes remain erased.
     defs 0x5000 - $, 0xff

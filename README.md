@@ -73,48 +73,113 @@ Flash the single generated image:
 build/src/p2000m-vid2vga-firmware.uf2
 ```
 
-## Capture and resampling
+## Video capture and VGA conversion
 
-The P2000M output is not a stream of ready-made VGA pixels. It provides one
-monochrome video signal together with horizontal and vertical synchronization
-signals. The Pico measures the video signal several times for every original
-picture dot, then uses the synchronization signals to reconstruct a 640 x 288
-pixel image.
+The P2000M connector does not carry a VGA-compatible raster. It exposes a
+one-bit monochrome `VIDEO` signal plus separate `HSYNC` and `VSYNC` timing
+signals. The adapter first converts those signals to safe 3.3 V logic, then the
+Pico measures and reconstructs the original dot grid before generating a new,
+independent VGA raster. The complete path is:
 
-The P2000M and the VGA display do not run at the same rate. The source produces
-about 50 frames per second, while VGA needs 60. The firmware therefore works
-with complete frames: it displays the newest complete source frame when one is
-available and otherwise repeats the previous one. It never changes source
-frames partway down the screen, avoiding *tearing*—an image made from parts of
-two different source frames.
+```text
+P2000M DIN-5 -> protection and Schmitt-trigger conditioning
+             -> PIO sampling and DMA raw-frame buffers
+             -> 640 x 288 one-bit reconstructed frames
+             -> color mapping and 640 x 480 VGA scanout
+```
 
-For each source line, the firmware starts measuring from its horizontal
-synchronization pulse. It also tracks the P2000M's actual timing and
-automatically adjusts where it reads each of the 640 dots. Three closely spaced
-measurements are checked for every reconstructed pixel; if any of them contains
-foreground, that pixel is treated as foreground. This helps preserve narrow
-parts of characters when the two devices' clocks do not line up exactly.
+### P2000M source timing
 
-### Implementation details
+The P2000M derives its display timing from a 12 MHz dot clock. Eight dots form
+one character time and 96 character times form one 64 microsecond scanline.
+Only 80 character times contain picture data, giving 640 visible dots per line.
+Twelve scanlines form a character row and 26 hardware rows form a frame, for a
+nominal frame rate of approximately 50.1 Hz.
 
-- The input-conditioning Schmitt triggers invert the signals, so a low captured
-  VIDEO level represents foreground and a high level represents background.
-- PIO1 samples VIDEO at 63 MHz. Every source line is aligned independently to
-  HSYNC, preventing small timing errors from accumulating across the frame.
-- Each DMA word holds 28 video samples taken over 30 PIO clock ticks. The
-  resampler maps the two branch ticks without samples to the nearest real
-  samples.
-- The horizontal dot period is calculated from the measured source-frame
-  period. Automatic tuning tests five nearby sampling phases and periodically
-  selects the best one.
-- A double-buffered pixel map applies timing updates between decoded frames, so
-  one frame always uses one consistent set of sampling positions.
-- Three raw-frame buffers let DMA continue capturing while core 0 processes the
-  newest complete frame. Three more buffers hold the reconstructed one-bit
-  frames while core 1 generates VGA output.
-- Core 1 accepts a reconstructed frame only at the beginning of a VGA frame.
-  All 640 source pixels are output, followed by a black level that resets the
-  RGB output before horizontal synchronization.
+The 24 rows stored in video memory do not have the same numbers as the hardware
+timing rows. Video-memory rows 0 through 23 appear in hardware rows 1 through
+24. Hardware rows 25 and 0 are part of the vertical blanking and preparation
+interval. `VSYNC` is active during hardware row 24, the final visible row:
+
+```text
+hardware row 24  video-memory row 23; VSYNC active
+hardware row 25  vertical blanking                     } skipped
+hardware row 0   vertical blanking / row preparation   } skipped
+hardware row 1   video-memory row 0; capture starts
+       ...
+hardware row 24  video-memory row 23; capture ends
+```
+
+The capture state machine waits for the trailing edge of the active-low
+conditioned `VSYNC`, which marks the start of hardware row 25. It then counts 24
+`HSYNC` edges to skip hardware rows 25 and 0. Capturing the following 288
+scanlines therefore covers hardware rows 1 through 24, or exactly 80 x 24
+characters. This distinction is important: treating the assertion of `VSYNC`
+as row 0 would capture one blank character row and omit video-memory row 23.
+
+### Probing and input conditioning
+
+The three P2000M signals enter through the DIN-5 connector. Each input has a
+1 kΩ series resistor to limit transient current and a BAT54A clamp for negative
+undershoot. A 3.3 V-powered 74LVC1G14 Schmitt-trigger inverter translates the
+5 V-class input to RP2350 logic levels, cleans up slow or noisy edges, and
+inverts its polarity before it reaches the Pico:
+
+| P2000M signal | Conditioned signal | Pico input | Purpose |
+| --- | --- | --- | --- |
+| `VIDEO` | `~VIDEO_IN` | GPIO16 | Monochrome dot level |
+| `HSYNC` | `~HSYNC_IN` | GPIO17 | Start reference for every scanline |
+| `VSYNC` | `~VSYNC_IN` | GPIO18 | Frame and hardware-row reference |
+
+All three conditioned inputs are consequently active-low. For `VIDEO`, a low
+sample represents foreground and a high sample represents background.
+
+### Line capture and pixel reconstruction
+
+PIO1 runs at 63 MHz and anchors every captured line independently to the
+leading edge of conditioned `HSYNC`. After a fixed delay to just before the
+active picture, it oversamples `VIDEO` for 54.286 microseconds. Independent
+line synchronization prevents small timing errors from accumulating vertically.
+
+The PIO loop takes 14 consecutive samples followed by one branch cycle without
+a sample. Two loops are packed into each DMA word, so a word holds 28 useful
+samples representing 30 PIO clock ticks. A line contains 114 words and a raw
+frame contains 288 such lines. DMA writes complete frames into three buffers so
+capture can continue while software reads an older completed frame.
+
+The source clock is not phase-locked to the Pico. The firmware therefore
+measures the source frame period, divides it over the known 312 scanlines and
+768 dot periods per line, and builds a map from each of the 640 output pixels to
+the appropriate raw samples. It tests five nearby horizontal phases and selects
+the phase with the strongest foreground content. For each reconstructed pixel,
+three adjacent samples are examined; if any is foreground, the output pixel is
+foreground. This preserves narrow character strokes without introducing gray
+interpolation pixels. A double-buffered map ensures that a timing adjustment
+cannot change partway through decoding a frame.
+
+Core 0 converts the newest completed raw capture into a packed 640 x 288 one-bit
+frame. Three decoded-frame buffers separate this work from VGA generation on
+core 1.
+
+### VGA presentation
+
+The Pico generates a standard 640 x 480 raster with a 25.2 MHz pixel clock and
+a nominal 60 Hz refresh rate. The P2000M and VGA rates are asynchronous, so core
+1 switches to the newest decoded source frame only at the beginning of a VGA
+frame. If no newer P2000M frame is ready, it repeats the current one. A VGA
+frame can therefore never contain parts of two source frames.
+
+Horizontally, all 640 reconstructed source pixels map directly to the 640 VGA
+pixels. Vertically, native mode presents all 288 source lines one-to-one between
+96-line top and bottom margins. Fit mode expands them to 480 lines with
+symmetric nearest-neighbour 5:3 scaling: each three-line source group becomes a
+2,1,2 pattern of repeated VGA lines.
+
+The one-bit image selects the configured foreground or background color. GPIO0
+through GPIO11 carry four bits each of red, green, and blue through the resistor
+DAC, while GPIO12 and GPIO13 generate VGA synchronization. After every 640-pixel
+picture line, the scanout emits black before horizontal blanking so the analog
+RGB outputs return to a defined level before synchronization.
 
 ## USB controls
 
