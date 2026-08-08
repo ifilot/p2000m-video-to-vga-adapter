@@ -90,10 +90,14 @@ if(APPLE)
     )
 endif()
 
+if(MSVC)
+    set(P2000M_WARNING_OPTIONS /W4)
+else()
+    set(P2000M_WARNING_OPTIONS -Wall -Wextra -Wpedantic)
+endif()
+
 target_compile_options(p2000m-vid2vga-viewer PRIVATE
-    -Wall
-    -Wextra
-    -Wpedantic
+    ${P2000M_WARNING_OPTIONS}
 )
 
 target_link_libraries(p2000m-vid2vga-viewer PRIVATE
@@ -160,9 +164,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_LIST_DIR}/../src
     )
     target_compile_options(p2000m-packbits-test PRIVATE
-        -Wall
-        -Wextra
-        -Wpedantic
+        ${P2000M_WARNING_OPTIONS}
     )
     add_test(NAME packbits-round-trip COMMAND p2000m-packbits-test)
 endif()

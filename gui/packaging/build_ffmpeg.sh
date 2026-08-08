@@ -34,7 +34,15 @@ download() {
     url=$1
     destination=$2
     if [ ! -s "$destination" ]; then
-        curl --fail --location --retry 3 --output "$destination" "$url"
+        temporary="$destination.part"
+        rm -f "$temporary"
+        if curl --fail --location --retry 5 --retry-all-errors \
+            --retry-delay 2 --output "$temporary" "$url"; then
+            mv "$temporary" "$destination"
+        else
+            rm -f "$temporary"
+            return 1
+        fi
     fi
 }
 
