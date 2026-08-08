@@ -11,6 +11,11 @@ and releases use [Semantic Versioning](https://semver.org/).
 
 ## [0.3.1] - 2026-08-08
 
+### Added
+
+- An optional viewer-side CRT phosphor afterglow effect with a persistent
+  enable switch and a tunable 10–1000 ms brightness half-life.
+
 ### Fixed
 
 - Corrected the Qt Installer Framework component identifier so the Windows

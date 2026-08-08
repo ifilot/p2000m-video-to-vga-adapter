@@ -28,6 +28,8 @@ set(P2000M_VIEWER_SOURCES
     main.cpp
     metric_graph_widget.cpp
     metric_graph_widget.h
+    phosphor_afterglow.cpp
+    phosphor_afterglow.h
     resources.qrc
 )
 
@@ -167,4 +169,19 @@ if(BUILD_TESTING)
         ${P2000M_WARNING_OPTIONS}
     )
     add_test(NAME packbits-round-trip COMMAND p2000m-packbits-test)
+
+    add_executable(p2000m-phosphor-afterglow-test
+        ../tests/phosphor_afterglow_test.cpp
+        phosphor_afterglow.cpp
+    )
+    target_include_directories(p2000m-phosphor-afterglow-test PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+    )
+    target_compile_options(p2000m-phosphor-afterglow-test PRIVATE
+        ${P2000M_WARNING_OPTIONS}
+    )
+    target_link_libraries(p2000m-phosphor-afterglow-test PRIVATE
+        Qt6::Gui
+    )
+    add_test(NAME phosphor-afterglow COMMAND p2000m-phosphor-afterglow-test)
 endif()

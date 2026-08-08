@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -46,6 +47,7 @@
 #include <QHBoxLayout>
 #include <QImage>
 #include <QIcon>
+#include <QInputDialog>
 #include <QKeySequence>
 #include <QLabel>
 #include <QMainWindow>
@@ -56,6 +58,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
+#include <QSettings>
 #include <QSpinBox>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -64,6 +67,7 @@
 
 #include "metric_graph_widget.h"
 #include "p2000m_packbits.h"
+#include "phosphor_afterglow.h"
 
 namespace {
 
@@ -86,6 +90,14 @@ constexpr int kSourceWidth = 640;
 constexpr int kSourceHeight = 288;
 /** Active line count reproduced by the VGA monitor view. */
 constexpr int kVgaHeight = 480;
+/** Nominal P2000M source-frame rate represented by sequence numbers. */
+constexpr double kNominalSourceFrameRate = 50.094;
+/** Default brightness half-life for the optional phosphor effect. */
+constexpr int kDefaultAfterglowHalfLifeMs = 120;
+/** Shortest configurable phosphor brightness half-life. */
+constexpr int kMinimumAfterglowHalfLifeMs = 10;
+/** Longest configurable phosphor brightness half-life. */
+constexpr int kMaximumAfterglowHalfLifeMs = 1000;
 
 /** Build the reflected CRC-32 lookup table used for frame validation. */
 constexpr std::array<quint32, 256> makeCrc32Table() {
@@ -593,8 +605,44 @@ public:
     }
 
     /** Publish a new complete frame and schedule a coalescible repaint. */
-    void setFrame(QImage frame) {
-        frame_ = std::move(frame);
+    void setFrame(QImage frame, quint32 sourceFrameStep = 1) {
+        sourceFrame_ = std::move(frame);
+        if (afterglowEnabled_ && afterglowHistoryValid_) {
+            const double elapsedMilliseconds =
+                1000.0 * std::max(sourceFrameStep, 1u) /
+                kNominalSourceFrameRate;
+            const double retention = std::exp2(
+                -elapsedMilliseconds / afterglowHalfLifeMs_);
+            frame_ = p2000m::applyPhosphorAfterglow(
+                sourceFrame_, frame_, retention);
+        } else {
+            frame_ = sourceFrame_;
+        }
+        afterglowHistoryValid_ = afterglowEnabled_;
+        ++frameSerial_;
+        update();
+    }
+
+    /** Enable or disable temporal phosphor persistence. */
+    void setAfterglowEnabled(bool enabled) {
+        if (afterglowEnabled_ == enabled) {
+            return;
+        }
+        afterglowEnabled_ = enabled;
+        resetAfterglow();
+    }
+
+    /** Set the time in which an unrefreshed trace loses half its brightness. */
+    void setAfterglowHalfLife(int milliseconds) {
+        afterglowHalfLifeMs_ = std::clamp(
+            milliseconds, kMinimumAfterglowHalfLifeMs,
+            kMaximumAfterglowHalfLifeMs);
+    }
+
+    /** Drop temporal history without discarding the latest source image. */
+    void resetAfterglow() {
+        frame_ = sourceFrame_;
+        afterglowHistoryValid_ = false;
         ++frameSerial_;
         update();
     }
@@ -612,11 +660,11 @@ public:
     }
 
     /** Return whether a decoded image is available. */
-    bool hasFrame() const { return !frame_.isNull(); }
+    bool hasFrame() const { return !sourceFrame_.isNull(); }
 
     /** Save the unscaled reconstructed VGA image. */
     bool saveFrame(const QString &filename) const {
-        return !frame_.isNull() && frame_.save(filename);
+        return !sourceFrame_.isNull() && sourceFrame_.save(filename);
     }
 
     /** Return the smoothed rate of unique frames actually painted. */
@@ -682,8 +730,16 @@ protected:
     }
 
 private:
+    /** Most recent unfiltered reconstructed VGA frame. */
+    QImage sourceFrame_;
     /** Most recent complete 640 x 480 image. */
     QImage frame_;
+    /** Whether temporal phosphor persistence is applied to new frames. */
+    bool afterglowEnabled_ = false;
+    /** Brightness half-life used by the temporal persistence filter. */
+    int afterglowHalfLifeMs_ = kDefaultAfterglowHalfLifeMs;
+    /** Whether frame_ contains history eligible for the next blend. */
+    bool afterglowHistoryValid_ = false;
     /** Whether noninteger scaling uses smooth interpolation. */
     bool smoothScaling_ = true;
     /** Whether image dimensions are constrained to integer multiples. */
@@ -710,6 +766,14 @@ public:
         setWindowIcon(QIcon(QStringLiteral(
             ":/icons/p2000m-vid2vga-viewer.png")));
         resize(1160, 760);
+
+        const QSettings settings;
+        afterglowEnabled_ = settings.value(
+            QStringLiteral("view/phosphorAfterglowEnabled"), false).toBool();
+        afterglowHalfLifeMs_ = std::clamp(
+            settings.value(QStringLiteral("view/phosphorAfterglowHalfLifeMs"),
+                           kDefaultAfterglowHalfLifeMs).toInt(),
+            kMinimumAfterglowHalfLifeMs, kMaximumAfterglowHalfLifeMs);
         createMenus();
 
         auto *central = new QWidget(this);
@@ -717,6 +781,8 @@ public:
         auto *contentLayout = new QHBoxLayout;
         contentLayout->setContentsMargins(0, 0, 0, 0);
         screen_ = new ScreenWidget(central);
+        screen_->setAfterglowHalfLife(afterglowHalfLifeMs_);
+        screen_->setAfterglowEnabled(afterglowEnabled_);
         contentLayout->addWidget(screen_, 1);
         statisticsPanel_ = createStatisticsPanel(central);
         contentLayout->addWidget(statisticsPanel_);
@@ -924,6 +990,14 @@ private:
         auto *integerAction = viewMenu->addAction(
             QStringLiteral("Pixel-perfect &Integer Scaling"));
         integerAction->setCheckable(true);
+        auto *afterglowMenu = viewMenu->addMenu(
+            QStringLiteral("CRT Phosphor &Afterglow"));
+        afterglowEnabledAction_ = afterglowMenu->addAction(
+            QStringLiteral("&Enabled"));
+        afterglowEnabledAction_->setCheckable(true);
+        afterglowEnabledAction_->setChecked(afterglowEnabled_);
+        afterglowDecayAction_ = afterglowMenu->addAction(QString());
+        updateAfterglowDecayActionText();
         viewMenu->addSeparator();
         fullScreenAction_ = viewMenu->addAction(QStringLiteral("&Full Screen"));
         fullScreenAction_->setCheckable(true);
@@ -970,6 +1044,13 @@ private:
         connect(integerAction, &QAction::toggled, this, [this](bool enabled) {
             screen_->setIntegerScaling(enabled);
         });
+        connect(afterglowEnabledAction_, &QAction::toggled,
+                this, [this](bool enabled) {
+                    setAfterglowEnabled(enabled);
+                });
+        connect(afterglowDecayAction_, &QAction::triggered, this, [this] {
+            configureAfterglowDecay();
+        });
         connect(fullScreenAction_, &QAction::toggled,
                 this, [this](bool enabled) { setPresentationMode(enabled); });
         connect(leaveFullScreenAction, &QAction::triggered, this, [this] {
@@ -1002,6 +1083,43 @@ private:
                          QStringLiteral(P2000M_FFMPEG_VERSION)));
             about.exec();
         });
+    }
+
+    /** Toggle the presentation-only CRT persistence effect and persist it. */
+    void setAfterglowEnabled(bool enabled) {
+        afterglowEnabled_ = enabled;
+        if (screen_ != nullptr) {
+            screen_->setAfterglowEnabled(enabled);
+        }
+        QSettings().setValue(
+            QStringLiteral("view/phosphorAfterglowEnabled"), enabled);
+    }
+
+    /** Ask for a brightness half-life and apply it to subsequent frames. */
+    void configureAfterglowDecay() {
+        bool accepted = false;
+        const int milliseconds = QInputDialog::getInt(
+            this, QStringLiteral("CRT Phosphor Afterglow"),
+            QStringLiteral("Brightness half-life (milliseconds):"),
+            afterglowHalfLifeMs_, kMinimumAfterglowHalfLifeMs,
+            kMaximumAfterglowHalfLifeMs, 10, &accepted);
+        if (!accepted) {
+            return;
+        }
+        afterglowHalfLifeMs_ = milliseconds;
+        screen_->setAfterglowHalfLife(milliseconds);
+        QSettings().setValue(
+            QStringLiteral("view/phosphorAfterglowHalfLifeMs"), milliseconds);
+        updateAfterglowDecayActionText();
+    }
+
+    /** Include the active half-life in the tunable menu item. */
+    void updateAfterglowDecayActionText() {
+        afterglowDecayAction_->setText(
+            QStringLiteral("Decay &Half-life… (%1 ms)")
+                .arg(afterglowHalfLifeMs_));
+        afterglowDecayAction_->setStatusTip(QStringLiteral(
+            "Time for an unrefreshed phosphor trace to lose half its brightness"));
     }
 
     /** Ask for a filename and save the latest unscaled framebuffer. */
@@ -1529,6 +1647,7 @@ private:
                 smoothedFirmwarePrepareUs_ = 0.0;
                 smoothedFirmwareEncodeUs_ = 0.0;
                 frameClock_.invalidate();
+                screen_->resetAfterglow();
                 clearStatisticsGraphs();
                 connectButton_->setEnabled(false);
                 connectAction_->setEnabled(false);
@@ -1711,6 +1830,11 @@ private:
             renderTimer.start();
             QImage rendered = renderFrame(payload, foreground, background,
                                           border, style);
+            const quint32 sourceFrameStep = lastSequenceValid_
+                                                ? std::max(
+                                                      sequence - lastSequence_,
+                                                      1u)
+                                                : 1u;
             const double renderMilliseconds =
                 static_cast<double>(renderTimer.nsecsElapsed()) / 1000000.0;
             smoothedRenderMilliseconds_ =
@@ -1719,17 +1843,16 @@ private:
                     : smoothedRenderMilliseconds_ * 0.85 +
                           renderMilliseconds * 0.15;
             recordFrame(rendered);
-            screen_->setFrame(std::move(rendered));
+            screen_->setFrame(std::move(rendered), sourceFrameStep);
             screenshotAction_->setEnabled(true);
             startRecordingAction_->setEnabled(!recording_ &&
                                                !recordingStopping_);
             ++frameCount_;
             if (lastSequenceValid_) {
-                const quint32 step = sequence - lastSequence_;
                 smoothedSequenceStep_ = smoothedSequenceStep_ == 0.0
-                                            ? step
+                                            ? sourceFrameStep
                                             : smoothedSequenceStep_ * 0.85 +
-                                                  step * 0.15;
+                                                  sourceFrameStep * 0.15;
             }
             lastSequence_ = sequence;
             lastSequenceValid_ = true;
@@ -2117,6 +2240,10 @@ private:
     QAction *stopRecordingAction_ = nullptr;
     /** Tracks and toggles presentation mode. */
     QAction *fullScreenAction_ = nullptr;
+    /** Toggles temporal CRT phosphor persistence. */
+    QAction *afterglowEnabledAction_ = nullptr;
+    /** Opens the tunable afterglow half-life control. */
+    QAction *afterglowDecayAction_ = nullptr;
     /** One-millisecond serial polling timer. */
     QTimer pollTimer_;
     /** Timeout clock for the active protocol state. */
@@ -2167,6 +2294,10 @@ private:
     bool firmwareTimingAvailable_ = false;
     /** Whether new reconstructed frames should be sent to FFmpeg. */
     bool recording_ = false;
+    /** Whether viewer-side CRT phosphor persistence is enabled. */
+    bool afterglowEnabled_ = false;
+    /** Persisted brightness half-life for CRT phosphor persistence. */
+    int afterglowHalfLifeMs_ = kDefaultAfterglowHalfLifeMs;
     /** Whether FFmpeg is flushing and finalizing its output container. */
     bool recordingStopping_ = false;
     /** Whether frame delivery failed before FFmpeg exited. */

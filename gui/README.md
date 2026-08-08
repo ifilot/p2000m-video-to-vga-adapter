@@ -43,9 +43,13 @@ information under **Help > About**. Recordings contain the reconstructed
 video compression away from the serial and painting paths. **View > Scaling
 Filter** switches between smooth anti-aliased resizing and sharp
 nearest-neighbor pixels. Pixel-perfect integer scaling avoids uneven pixel
-widths, while **F11** enters a clean full-screen presentation and **Escape**
-leaves it. The monitor-derived application icon is used by the executable,
-main window, dialogs, and taskbar.
+widths. **View > CRT Phosphor Afterglow** optionally retains decaying light
+from earlier frames; its brightness half-life is tunable from 10 to 1000 ms
+and both settings persist between viewer sessions. The effect is limited to
+presentation, so recordings and lossless framebuffer screenshots retain the
+unfiltered adapter image. **F11** enters a clean full-screen presentation and
+**Escape** leaves it. The monitor-derived application icon is used by the
+executable, main window, dialogs, and taskbar.
 
 The application uses SetupAPI and direct COM access on Windows, preserving the
 high-throughput path tested with the adapter. Linux and macOS use a compact
