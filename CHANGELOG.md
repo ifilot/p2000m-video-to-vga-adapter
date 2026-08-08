@@ -22,6 +22,8 @@ and releases use [Semantic Versioning](https://semver.org/).
   firmware, hardware, documentation, and bundled license texts.
 - A `license` USB command and startup notice reporting the firmware's copyright,
   license, warranty, and source location.
+- An independently colored border with selectable solid or dotted rendering,
+  configurable and persistent through the USB console.
 
 ### Changed
 

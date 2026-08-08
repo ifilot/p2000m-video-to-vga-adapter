@@ -177,7 +177,9 @@ pixels. Vertically, native mode presents all 288 source lines one-to-one between
 symmetric nearest-neighbour 5:3 scaling: each three-line source group becomes a
 2,1,2 pattern of repeated VGA lines.
 
-The one-bit image selects the configured foreground or background color. GPIO0
+The one-bit image selects the configured foreground or background color. The
+optional border is added during scanout, so it can use an independent color and
+a solid or dotted pattern without expanding the one-bit frame buffers. GPIO0
 through GPIO11 carry four bits each of red, green, and blue through the resistor
 DAC, while GPIO12 and GPIO13 generate VGA synchronization. After every 640-pixel
 picture line, the scanout emits black before horizontal blanking so the analog
@@ -199,15 +201,21 @@ unsolicited statistics.
 - `settings`: print all active settings and whether they are factory defaults,
   modified in RAM, or saved in flash.
 - `border on`, `border off`, or `border toggle`: control a one-pixel rectangle
-  around the 640 x 288 source image. It uses the foreground color.
+  around the 640 x 288 source image.
+- `border-color <color>`: set the border color independently of the foreground
+  and background colors.
+- `border-style solid` or `border-style dotted`: select a continuous border or
+  a two-pixel-on, two-pixel-off pattern whose gaps reveal the source image.
 - `scale fit`: expand 288 source lines to the full 480-line VGA height.
 - `scale native`: show the original 288 lines between 96-line margins.
 - `fg <color>`: set the foreground/text color.
 - `bg <color>`: set the background color, including the top and bottom margins.
 - `colors`: list the named presets.
-- `defaults`: restore white on black, border off, and native 1:1 scaling.
-- `save`: explicitly save the current colors, border, scaling mode, and manual
-  phase trim. These settings are restored after reset or power cycling.
+- `defaults`: restore white on black, a disabled solid magenta (`#FF00FF`)
+  border, and native 1:1 scaling.
+- `save`: explicitly save the current colors, border state, border pattern,
+  scaling mode, and manual phase trim. These settings are restored after reset
+  or power cycling.
 - `factory-reset`: erase the saved configuration and immediately restore the
   factory display style and zero manual phase trim.
 - `tune` or `j`: run automatic phase tuning and print all candidate scores.
