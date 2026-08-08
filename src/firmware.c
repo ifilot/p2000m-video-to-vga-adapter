@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 /**
  * @file firmware.c
  * @brief Production P2000M capture, resampling, VGA, and USB-control firmware.
@@ -1227,6 +1232,18 @@ static void print_firmware_version(void) {
 }
 
 /**
+ * @brief Print the firmware copyright, license, and source location.
+ *
+ * @return Nothing.
+ */
+static void print_firmware_license(void) {
+    printf("Copyright (C) 2026 Ivo Filot.\n"
+           "Free software under GNU GPLv3 or later; there is NO WARRANTY.\n"
+           "License and source: "
+           "https://github.com/ifilot/p2000m-video-to-vga-adapter\n");
+}
+
+/**
  * @brief Leave statistics streaming and restore an editable command prompt.
  *
  * @return Nothing.
@@ -1259,6 +1276,7 @@ static void print_help(void) {
     printf("Commands (press Enter after each command):\n"
            "  status | s                 timing and buffer statistics\n"
            "  version | v                show the firmware version\n"
+           "  license                    copyright and license information\n"
            "  log                        stream statistics every two seconds\n"
            "  settings                   current runtime and storage settings\n"
            "  border [on|off|toggle]     visible-area rectangle in text color\n"
@@ -1317,6 +1335,9 @@ static void process_usb_command(char *command) {
         print_statistics();
     } else if (strcmp(command, "version") == 0 || strcmp(command, "v") == 0) {
         print_firmware_version();
+    } else if (strcmp(command, "license") == 0 ||
+               strcmp(command, "copying") == 0) {
+        print_firmware_license();
     } else if (strcmp(command, "log") == 0) {
         enter_usb_log_mode();
     } else if (strcmp(command, "settings") == 0) {
@@ -1553,6 +1574,7 @@ int main(void) {
             sleep_ms(100);
             printf("P2000M VID2VGA firmware %s ready: 640x288 source to "
                    "640x480 VGA.\n", firmware_version);
+            print_firmware_license();
             print_display_settings();
             printf("Enter HELP for available commands.\n");
             announced = true;

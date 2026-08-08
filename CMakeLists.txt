@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 cmake_minimum_required(VERSION 3.13)
 
 # Keep the SDK and extras versions reproducible across local and CI builds.

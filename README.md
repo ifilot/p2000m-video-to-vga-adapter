@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+SPDX-License-Identifier: CC-BY-4.0
+-->
+
 # P2000M VID2VGA adapter
 
 [![Firmware](https://github.com/ifilot/p2000m-video-to-vga-adapter/actions/workflows/firmware.yml/badge.svg)](https://github.com/ifilot/p2000m-video-to-vga-adapter/actions/workflows/firmware.yml)
@@ -5,7 +10,7 @@
 This repository contains the adapter PCB and Raspberry Pi Pico 2 firmware for
 converting the Philips P2000M raw monochrome video output to VGA.
 
-Firmware version **v0.1.0** captures the conditioned P2000M signals on GPIO16-18,
+The adapter captures the conditioned P2000M signals on GPIO16-18,
 recovers the source dot grid in software, and presents a tear-free 640 x 288
 source image in a 640 x 480, 60 Hz VGA raster. The asynchronous 50.095 Hz
 source is repeated as needed at VGA frame boundaries.
@@ -15,6 +20,22 @@ and bottom margins. An optional fit mode expands them to all 480 VGA lines using
 symmetric nearest-neighbour 5:3 scaling. Each three-line source group becomes
 five output lines in a 2,1,2 repetition pattern, preserving hard text edges
 without introducing gray interpolation pixels.
+
+## Hardware
+
+The adapter conditions the P2000M video and synchronization signals for the
+Pico 2, then converts the Pico's 12-bit RGB output and synchronization signals
+to a standard VGA connection.
+
+[![3D rendering of the assembled P2000M VID2VGA adapter PCB](images/p2000m-to-vga-adapter.png)](images/p2000m-to-vga-adapter.png)
+
+*3D rendering of the assembled adapter. The board design is in
+[`pcb/p2000m-to-vga-adapter.kicad_pcb`](pcb/p2000m-to-vga-adapter.kicad_pcb).*
+
+[![Circuit schematic for the P2000M VID2VGA adapter](images/p2000m-to-vga-adapter-schematic.png)](pcb/p2000m-to-vga-adapter.pdf)
+
+*Circuit schematic. Select the image to open the PDF; the editable source is
+[`pcb/p2000m-to-vga-adapter.kicad_sch`](pcb/p2000m-to-vga-adapter.kicad_sch).*
 
 ## Building
 
@@ -54,24 +75,46 @@ build/src/p2000m-vid2vga-firmware.uf2
 
 ## Capture and resampling
 
-The PCB's Schmitt trigger inverts the source, so a cleared captured bit means
-foreground and a set bit means background. PIO1 samples VIDEO uniformly at
-63 MHz and anchors each line independently to HSYNC. Each packed word contains
-28 useful samples and represents 30 PIO ticks; the software model explicitly
-accounts for the two loop-branch gaps.
+The P2000M output is not a stream of ready-made VGA pixels. It provides one
+monochrome video signal together with horizontal and vertical synchronization
+signals. The Pico measures the video signal several times for every original
+picture dot, then uses the synchronization signals to reconstruct a 640 x 288
+pixel image.
 
-Three raw buffers decouple continuous DMA capture from software. The resampler
-derives the horizontal dot period from the measured frame period, searches five
-candidate phases, and decodes each output pixel from an early/centre/late
-three-sample window. A double-buffered map allows automatic tuning updates
-without mixing mappings inside a decoded frame.
+The P2000M and the VGA display do not run at the same rate. The source produces
+about 50 frames per second, while VGA needs 60. The firmware therefore works
+with complete frames: it displays the newest complete source frame when one is
+available and otherwise repeats the previous one. It never changes source
+frames partway down the screen, avoiding *tearing*—an image made from parts of
+two different source frames.
 
-Core 0 converts the newest raw frame into one-bit pixels. Three decoded buffers
-ensure that one complete pending frame remains available while another is being
-displayed and the third is filled. Core 1 changes decoded-frame ownership only
-at the start of a VGA frame, preventing tearing and handoff starvation. All 640
-source pixels are output; an additional black pixel in the front porch returns
-the RGB DAC to black before synchronization.
+For each source line, the firmware starts measuring from its horizontal
+synchronization pulse. It also tracks the P2000M's actual timing and
+automatically adjusts where it reads each of the 640 dots. Three closely spaced
+measurements are checked for every reconstructed pixel; if any of them contains
+foreground, that pixel is treated as foreground. This helps preserve narrow
+parts of characters when the two devices' clocks do not line up exactly.
+
+### Implementation details
+
+- The input-conditioning Schmitt triggers invert the signals, so a low captured
+  VIDEO level represents foreground and a high level represents background.
+- PIO1 samples VIDEO at 63 MHz. Every source line is aligned independently to
+  HSYNC, preventing small timing errors from accumulating across the frame.
+- Each DMA word holds 28 video samples taken over 30 PIO clock ticks. The
+  resampler maps the two branch ticks without samples to the nearest real
+  samples.
+- The horizontal dot period is calculated from the measured source-frame
+  period. Automatic tuning tests five nearby sampling phases and periodically
+  selects the best one.
+- A double-buffered pixel map applies timing updates between decoded frames, so
+  one frame always uses one consistent set of sampling positions.
+- Three raw-frame buffers let DMA continue capturing while core 0 processes the
+  newest complete frame. Three more buffers hold the reconstructed one-bit
+  frames while core 1 generates VGA output.
+- Core 1 accepts a reconstructed frame only at the beginning of a VGA frame.
+  All 640 source pixels are output, followed by a black level that resets the
+  RGB output before horizontal synchronization.
 
 ## USB controls
 
@@ -82,6 +125,8 @@ unsolicited statistics.
 
 - `status` or `s`: print capture, decoder, resampler, and VGA statistics.
 - `version` or `v`: print the semantic firmware version.
+- `license`: print the firmware copyright, license, warranty, and source
+  location.
 - `log`: stream those statistics every two seconds. Press Enter, Escape, or
   `q` to stop the stream and return to the command prompt.
 - `settings`: print all active settings and whether they are factory defaults,
@@ -118,3 +163,20 @@ signal; only the user's manual phase trim is persistent.
 Automatic tuning runs about once every five seconds. The `stale_replaced`
 counter normally increases when newer raw frames supersede frames that no
 consumer needed; it is not itself a capture failure.
+
+## Licensing
+
+This is a multi-license project:
+
+- The firmware, build configuration, CI workflow, and P2000M screen-test
+  program are licensed under the
+  [GNU GPL version 3 or later](LICENSES/GPL-3.0-or-later.txt).
+- The PCB, schematic, custom footprints, and generated hardware views are
+  licensed under the
+  [CERN Open Hardware Licence Version 2—Strongly Reciprocal](LICENSES/CERN-OHL-S-2.0.txt).
+- This README and the changelog are licensed under
+  [Creative Commons Attribution 4.0](LICENSES/CC-BY-4.0.txt).
+
+See [LICENSE.md](LICENSE.md) for the exact file scopes and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for components incorporated
+from the Raspberry Pi Pico SDK, `pico-extras`, and TinyUSB.

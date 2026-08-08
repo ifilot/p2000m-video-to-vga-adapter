@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+SPDX-License-Identifier: CC-BY-4.0
+-->
+
 # Changelog
 
 All notable changes to the P2000M VID2VGA firmware are documented here. The

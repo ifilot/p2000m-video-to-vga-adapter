@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 name: Firmware
 
 on:
@@ -103,6 +106,26 @@ jobs:
             emit && /^## \[/ && index($0, heading) != 1 { exit }
             emit { print }
           ' CHANGELOG.md > dist/release-notes.md
+          install -m 0644 LICENSE.md THIRD_PARTY_NOTICES.md dist/
+          install -m 0644 LICENSES/GPL-3.0-or-later.txt \
+            dist/LICENSE-GPL-3.0-or-later.txt
+          install -m 0644 LICENSES/CERN-OHL-S-2.0.txt \
+            dist/LICENSE-CERN-OHL-S-2.0.txt
+          install -m 0644 LICENSES/CC-BY-4.0.txt \
+            dist/LICENSE-CC-BY-4.0.txt
+          install -m 0644 LICENSES/BSD-3-Clause.txt \
+            dist/LICENSE-BSD-3-Clause.txt
+          install -m 0644 LICENSES/MIT.txt dist/LICENSE-MIT.txt
+          cat >> dist/release-notes.md <<EOF
+
+          ### Source and licensing
+
+          The corresponding project source for this binary is available at
+          https://github.com/$GITHUB_REPOSITORY/tree/$RELEASE_TAG. The build
+          downloads the exact dependency revisions listed in
+          THIRD_PARTY_NOTICES.md. License and third-party notice files are
+          attached to this release alongside the UF2.
+          EOF
           test -s "dist/p2000m-vid2vga-firmware-$RELEASE_TAG.uf2"
           test -s dist/release-notes.md
 
@@ -137,12 +160,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          asset="dist/p2000m-vid2vga-firmware-$RELEASE_TAG.uf2"
+          assets=(
+            "dist/p2000m-vid2vga-firmware-$RELEASE_TAG.uf2"
+            dist/LICENSE.md
+            dist/LICENSE-GPL-3.0-or-later.txt
+            dist/LICENSE-CERN-OHL-S-2.0.txt
+            dist/LICENSE-CC-BY-4.0.txt
+            dist/LICENSE-BSD-3-Clause.txt
+            dist/LICENSE-MIT.txt
+            dist/THIRD_PARTY_NOTICES.md
+          )
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "$asset" \
+            gh release upload "$RELEASE_TAG" "${assets[@]}" \
               --clobber --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$RELEASE_TAG" "$asset" \
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
               --verify-tag \
               --title "P2000M VID2VGA firmware $RELEASE_TAG" \
               --notes-file dist/release-notes.md \
