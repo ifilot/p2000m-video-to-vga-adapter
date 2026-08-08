@@ -9,6 +9,13 @@ All notable changes to the P2000M VID2VGA firmware are documented here. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and releases use [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-08-08
+
+### Fixed
+
+- Corrected the Qt Installer Framework component identifier so the Windows
+  installer can load its shortcut-creation script and proceed past Welcome.
+
 ## [0.3.0] - 2026-08-08
 
 ### Added
@@ -135,6 +142,7 @@ and releases use [Semantic Versioning](https://semver.org/).
 - Pico 2/RP2350 project defaults and an early, actionable error when the Arm
   cross-compiler is not installed.
 
+[0.3.1]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ifilot/p2000m-video-to-vga-adapter/releases/tag/v0.1.0

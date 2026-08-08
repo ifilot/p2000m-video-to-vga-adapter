@@ -6,7 +6,7 @@
     <Description>Live monitor, recorder, and configuration utility for the P2000M VID2VGA adapter. Includes the private FFmpeg recording runtime.</Description>
     <Version>@VERSION@</Version>
     <ReleaseDate>@RELEASE_DATE@</ReleaseDate>
-    <Name>nl.ivofilot.p2000m-vid2vga-viewer</Name>
+    <Name>@COMPONENT_ID@</Name>
     <Licenses>
         <License name="P2000M VID2VGA Viewer — GNU GPL v3 or later" file="LICENSE-GPL-3.0-or-later.txt" />
         <License name="FFmpeg — GNU GPL v3 or later" file="FFMPEG-COPYING.GPLv3" />

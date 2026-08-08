@@ -3,7 +3,7 @@
 
 cmake_minimum_required(VERSION 3.21)
 
-project(p2000m_vid2vga_viewer VERSION 0.3.0 LANGUAGES CXX)
+project(p2000m_vid2vga_viewer VERSION 0.3.1 LANGUAGES CXX)
 
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/package-version.txt"
     "${PROJECT_VERSION}\n")

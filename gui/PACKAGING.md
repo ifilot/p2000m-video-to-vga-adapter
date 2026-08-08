@@ -44,7 +44,7 @@ failures before merge, rather than waiting for a release tag.
 ## Tagging and release promotion
 
 `.github/workflows/release.yml` is intentionally a promotion workflow, not a
-build workflow. For a tag such as `v0.3.0`, it:
+build workflow. For a tag such as `v0.3.1`, it:
 
 1. verifies that the tag matches both CMake project versions and `CHANGELOG.md`;
 2. finds successful firmware and GUI default-branch runs for the exact tagged
@@ -66,8 +66,8 @@ git switch master
 git pull --ff-only
 
 # Confirm Firmware and all four GUI package jobs are green for HEAD.
-git tag -a v0.3.0 -m "Release v0.3.0"
-git push origin v0.3.0
+git tag -a v0.3.1 -m "Release v0.3.1"
+git push origin v0.3.1
 ```
 
 If artifacts have expired, rerun the original successful `master` workflows
@@ -107,8 +107,8 @@ on `PATH`, and run:
 
 ```powershell
 gui/packaging/create_windows_installer.ps1 `
-  -Stage stage -Version 0.3.0 `
-  -Output dist/p2000m-vid2vga-viewer-0.3.0-windows-x86_64-setup.exe `
+  -Stage stage -Version 0.3.1 `
+  -Output dist/p2000m-vid2vga-viewer-0.3.1-windows-x86_64-setup.exe `
   -WorkDirectory installer-work
 ```
 
