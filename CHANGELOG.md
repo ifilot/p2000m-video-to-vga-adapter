@@ -9,6 +9,35 @@ All notable changes to the P2000M VID2VGA firmware are documented here. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and releases use [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-08-08
+
+### Added
+
+- A buildable P2000M screen-test cartridge with row and column rulers, a
+  scrolling title, an elapsed-time display, and automatic cartridge-header
+  signing and checksum generation.
+- Four M3 mounting holes to the schematic and PCB design, together with updated
+  board and schematic renders.
+- Explicit per-file licensing, third-party notices, and SPDX metadata for the
+  firmware, hardware, documentation, and bundled license texts.
+- A `license` USB command and startup notice reporting the firmware's copyright,
+  license, warranty, and source location.
+
+### Changed
+
+- Tagged firmware releases now include the applicable license texts and
+  third-party notices alongside the UF2 image.
+- Expanded the documentation of the adapter hardware, P2000M source timing,
+  signal conditioning, capture pipeline, pixel reconstruction, and VGA output.
+
+### Fixed
+
+- Corrected the DIN-5 connector mapping for the `VIDEO`, `HSYNC`, `VSYNC`, and
+  ground signals in the schematic and PCB.
+- Aligned capture to the trailing edge of `VSYNC` and skipped the two blank
+  hardware rows, preventing a blank first character row from replacing the
+  final visible row.
+
 ## [0.1.0] - 2026-08-07
 
 ### Added
@@ -38,4 +67,5 @@ and releases use [Semantic Versioning](https://semver.org/).
 - Pico 2/RP2350 project defaults and an early, actionable error when the Arm
   cross-compiler is not installed.
 
+[0.2.0]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ifilot/p2000m-video-to-vga-adapter/releases/tag/v0.1.0
