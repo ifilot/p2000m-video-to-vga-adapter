@@ -202,7 +202,7 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
               --verify-tag \
-              --title "P2000M VID2VGA $GITHUB_REF_NAME" \
+              --title "Patch $GITHUB_REF_NAME" \
               --notes-file release-notes.md \
               --repo "$GITHUB_REPOSITORY"
           fi
