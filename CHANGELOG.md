@@ -18,6 +18,8 @@ and releases use [Semantic Versioning](https://semver.org/).
 - A permanent 12 px rounded bezel around the viewer's live monitor viewport.
 - Viewer-side 100 ms source-signal loss detection with the same status card as
   the physical VGA output and automatic recovery when valid frames resume.
+- A third screen-test cartridge view showing all 256 alphanumeric and graphics
+  glyphs from the P2000M character ROM in a labelled 16 by 16 map.
 
 ### Fixed
 

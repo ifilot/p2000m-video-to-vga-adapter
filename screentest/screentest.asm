@@ -5,8 +5,9 @@
 ;
 ; The P2000M maps its 2 KiB character RAM at 0x5000 and its 2 KiB
 ; attribute RAM at 0x5800.  The first 80 * 24 character locations are
-; visible.  Space switches between a timer/marquee screen-test ruler and an
-; animated Matrix-style character-rain display.
+; visible.  Space cycles through a timer/marquee screen-test ruler, an animated
+; Matrix-style character-rain display, and a map of all 256 character-ROM
+; glyphs.
 
     org 0x1000
 
@@ -34,7 +35,7 @@ start:
     ld hl,marquee_text
     ld (0x6217),hl
     xor a
-    ld (0x6219),a               ; current mode: 0=timer/marquee, 1=matrix
+    ld (0x6219),a               ; current mode: 0=timer, 1=matrix, 2=character map
     ld (0x621a),a               ; Space-key debounce latch
     ld hl,(0x6010)
     ld a,h
@@ -54,7 +55,18 @@ random_seed_ready:
 main_loop:
     ld a,(0x6219)
     or a
-    jr nz,matrix_frame
+    jr z,regular_frame
+    dec a
+    jr z,matrix_frame
+
+character_map_frame:
+    ld b,150
+    call frame_delay
+    call update_timer
+    call poll_mode_switch
+    jr z,main_loop
+    call enter_selected_mode
+    jr main_loop
 
 regular_frame:
     call update_marquee
@@ -82,7 +94,9 @@ enter_selected_mode:
     ld a,(0x6219)
     or a
     jp z,draw_regular_screen
-    jp init_matrix_screen
+    dec a
+    jp z,init_matrix_screen
+    jp draw_character_map_screen
 
 ; Clear the complete character and attribute planes.
 clear_screen:
@@ -288,7 +302,7 @@ frame_delay_inner:
     djnz frame_delay
     ret
 
-; Toggle modes once per Space press using the monitor's keyboard buffer.  The
+; Cycle modes once per Space press using the monitor's keyboard buffer.  The
 ; monitor scans the keyboard every 20 ms and exposes non-blocking STATUSKEY at
 ; 0x0029 and buffered READKEY at 0x0026.  Space has matrix keycode 0x11 (row 2,
 ; bit 1); these routines return keycodes rather than display/ASCII values.
@@ -322,10 +336,15 @@ mode_key_buffer:
     inc a
     ld (0x621a),a
     ld a,(0x6219)
-    xor 1
+    inc a
+    cp 3
+    jr c,store_selected_mode
+    xor a
+
+store_selected_mode:
     ld (0x6219),a
     ld a,1
-    or a                          ; successful toggle must return NZ in both directions
+    or a                          ; successful selection must return NZ in every mode
     ret
 
 ; Set up eighty independent rain columns.  Head positions are staggered over
@@ -361,6 +380,111 @@ matrix_footer_attributes:
     ld (hl),a
     inc hl
     djnz matrix_footer_attributes
+    ret
+
+; Show every character-generator entry as a 16 by 16 table.  The M video board
+; supplies seven character-code bits and a separate graphics-select bit to its
+; character ROM, giving 128 alphanumeric and 128 graphics glyphs.  Rows 8-F
+; therefore reuse codes 0x00-0x7f with the graphics attribute set.
+draw_character_map_screen:
+    call clear_screen
+
+    ld hl,character_map_title
+    ld de,0x5059
+    ld bc,character_map_title_end - character_map_title
+    ldir
+    ld hl,character_map_columns
+    ld de,0x5106
+    ld bc,character_map_columns_end - character_map_columns
+    ldir
+
+    ld b,0
+
+character_map_row:
+    ld a,b
+    add a,4
+    ld c,22
+    call row_column_address
+
+    ld a,b
+    call hexadecimal_digit
+    ld (hl),a
+    inc hl
+    ld (hl),':'
+    inc hl
+    ld (hl),' '
+    inc hl
+
+    ld a,b
+    rlca
+    rlca
+    rlca
+    rlca
+    ld d,a
+    ld c,0
+
+character_map_column:
+    ld a,d
+    add a,c
+    and 0x7f
+    ld (hl),a
+    inc hl
+    ld (hl),' '
+    inc hl
+    inc c
+    ld a,c
+    cp 16
+    jr nz,character_map_column
+
+    inc b
+    ld a,b
+    cp 16
+    jr nz,character_map_row
+
+    ; Set graphics-select on the glyph cells in rows 8-F.  The labels and the
+    ; separating spaces remain ordinary characters.
+    ld a,12
+    ld c,25
+    call row_column_address
+    ld de,0x0800
+    add hl,de
+    ld b,8
+
+character_map_graphics_row:
+    ld c,16
+
+character_map_graphics_column:
+    ld (hl),0x01
+    inc hl
+    inc hl
+    dec c
+    jr nz,character_map_graphics_column
+
+    ld de,48
+    add hl,de
+    djnz character_map_graphics_row
+
+    ld hl,character_map_footer
+    ld de,0x56f3
+    ld bc,character_map_footer_end - character_map_footer
+    ldir
+    ld a,0x08
+    ld hl,0x5ef3
+    ld b,character_map_footer_end - character_map_footer
+
+character_map_footer_attributes:
+    ld (hl),a
+    inc hl
+    djnz character_map_footer_attributes
+    ret
+
+; Convert the low nibble of A to an uppercase hexadecimal digit.
+hexadecimal_digit:
+    and 0x0f
+    add a,'0'
+    cp '9' + 1
+    ret c
+    add a,'A' - '9' - 1
     ret
 
 ; Advance all rain columns by one animation frame.  Existing trail characters
@@ -665,8 +789,20 @@ marquee_text:
     db "P2000M VID2VGA    SPACE: MATRIX MODE    ", 0xff
 
 matrix_footer:
-    db " MATRIX RAIN // SPACE: TIMER + MARQUEE "
+    db " MATRIX RAIN // SPACE: CHARACTER MAP  "
 matrix_footer_end:
+
+character_map_title:
+    db "P2000M CHARACTER ROM: 256 GLYPHS (00-7F TEXT, 80-FF GRAPHICS)"
+character_map_title_end:
+
+character_map_columns:
+    db "   0 1 2 3 4 5 6 7 8 9 A B C D E F"
+character_map_columns_end:
+
+character_map_footer:
+    db " CHARACTER MAP // SPACE: TIMER + MARQUEE "
+character_map_footer_end:
 
 ; Character-RAM address of the first cell in every visible row.
 screen_rows:
