@@ -50,10 +50,13 @@
 #include <QInputDialog>
 #include <QKeySequence>
 #include <QLabel>
+#include <QLayout>
 #include <QMainWindow>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPainter>
+#include <QPainterPath>
+#include <QPalette>
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -63,6 +66,7 @@
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTimer>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include "metric_graph_widget.h"
@@ -90,6 +94,14 @@ constexpr int kSourceWidth = 640;
 constexpr int kSourceHeight = 288;
 /** Active line count reproduced by the VGA monitor view. */
 constexpr int kVgaHeight = 480;
+/** Fixed black bezel surrounding the live monitor viewport. */
+constexpr int kMonitorBezelWidth = 12;
+/** Corner radius of the live monitor's outer bezel. */
+constexpr int kMonitorBezelRadius = 14;
+/** Subtle rounding retained on the inner screen aperture. */
+constexpr int kMonitorScreenRadius = 5;
+/** Optional black margin added around captured screenshots and recordings. */
+constexpr int kCaptureBorderWidth = 12;
 /** Nominal P2000M source-frame rate represented by sequence numbers. */
 constexpr double kNominalSourceFrameRate = 50.094;
 /** Default brightness half-life for the optional phosphor effect. */
@@ -98,6 +110,17 @@ constexpr int kDefaultAfterglowHalfLifeMs = 120;
 constexpr int kMinimumAfterglowHalfLifeMs = 10;
 /** Longest configurable phosphor brightness half-life. */
 constexpr int kMaximumAfterglowHalfLifeMs = 1000;
+
+/** Add the optional fixed-width black margin used by exported captures. */
+QImage addCaptureBorder(const QImage &frame) {
+    QImage bordered(frame.width() + 2 * kCaptureBorderWidth,
+                    frame.height() + 2 * kCaptureBorderWidth,
+                    QImage::Format_RGB32);
+    bordered.fill(Qt::black);
+    QPainter painter(&bordered);
+    painter.drawImage(kCaptureBorderWidth, kCaptureBorderWidth, frame);
+    return bordered;
+}
 
 /** Build the reflected CRC-32 lookup table used for frame validation. */
 constexpr std::array<quint32, 256> makeCrc32Table() {
@@ -598,9 +621,10 @@ private:
 /** Paints the reconstructed VGA frame and records actual presentation cost. */
 class ScreenWidget final : public QWidget {
 public:
-    /** Construct an expanding widget with a native 640 x 480 minimum size. */
+    /** Construct an expanding widget including the fixed monitor bezel. */
     explicit ScreenWidget(QWidget *parent = nullptr) : QWidget(parent) {
-        setMinimumSize(640, 480);
+        setMinimumSize(kSourceWidth + 2 * kMonitorBezelWidth,
+                       kVgaHeight + 2 * kMonitorBezelWidth);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     }
 
@@ -662,9 +686,13 @@ public:
     /** Return whether a decoded image is available. */
     bool hasFrame() const { return !sourceFrame_.isNull(); }
 
-    /** Save the unscaled reconstructed VGA image. */
-    bool saveFrame(const QString &filename) const {
-        return !sourceFrame_.isNull() && sourceFrame_.save(filename);
+    /** Save the unscaled reconstructed VGA image with an optional margin. */
+    bool saveFrame(const QString &filename, bool addBorder) const {
+        if (sourceFrame_.isNull()) {
+            return false;
+        }
+        return (addBorder ? addCaptureBorder(sourceFrame_) : sourceFrame_)
+            .save(filename);
     }
 
     /** Return the smoothed rate of unique frames actually painted. */
@@ -678,32 +706,59 @@ protected:
         QElapsedTimer duration;
         duration.start();
         QPainter painter(this);
-        painter.fillRect(rect(), Qt::black);
-        if (frame_.isNull()) {
-            painter.setPen(QColor(180, 180, 180));
-            painter.drawText(rect(), Qt::AlignCenter,
-                             QStringLiteral("Waiting for P2000M video"));
-            return;
-        }
+        painter.fillRect(rect(), palette().window());
+
+        const QSize availableSize(
+            std::max(0, width() - 2 * kMonitorBezelWidth),
+            std::max(0, height() - 2 * kMonitorBezelWidth));
+        const QSize frameSize = frame_.isNull()
+                                    ? QSize(kSourceWidth, kVgaHeight)
+                                    : frame_.size();
 
         QSize targetSize;
         if (integerScaling_) {
-            const int factor = std::min(width() / frame_.width(),
-                                        height() / frame_.height());
+            const int factor = std::min(
+                availableSize.width() / frameSize.width(),
+                availableSize.height() / frameSize.height());
             targetSize = factor >= 1
-                             ? frame_.size() * factor
-                             : frame_.size().scaled(size(),
-                                                    Qt::KeepAspectRatio);
+                             ? frameSize * factor
+                             : frameSize.scaled(availableSize,
+                                                Qt::KeepAspectRatio);
         } else {
-            targetSize = frame_.size().scaled(size(), Qt::KeepAspectRatio);
+            targetSize = frameSize.scaled(availableSize,
+                                          Qt::KeepAspectRatio);
         }
         const QRect target(
             QPoint((width() - targetSize.width()) / 2,
                    (height() - targetSize.height()) / 2),
             targetSize);
+
+        const QRect bezel = target.adjusted(
+            -kMonitorBezelWidth, -kMonitorBezelWidth,
+            kMonitorBezelWidth, kMonitorBezelWidth);
+        QPainterPath bezelPath;
+        bezelPath.addRoundedRect(QRectF(bezel), kMonitorBezelRadius,
+                                 kMonitorBezelRadius);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.fillPath(bezelPath, Qt::black);
+
+        QPainterPath screenPath;
+        screenPath.addRoundedRect(QRectF(target), kMonitorScreenRadius,
+                                  kMonitorScreenRadius);
+        painter.save();
+        painter.setClipPath(screenPath);
+        painter.fillRect(target, Qt::black);
+        if (frame_.isNull()) {
+            painter.setPen(QColor(180, 180, 180));
+            painter.drawText(target, Qt::AlignCenter,
+                             QStringLiteral("Waiting for P2000M video"));
+            painter.restore();
+            return;
+        }
         painter.setRenderHint(QPainter::SmoothPixmapTransform,
                               smoothScaling_ && !integerScaling_);
         painter.drawImage(target, frame_);
+        painter.restore();
 
         if (paintedSerial_ != frameSerial_) {
             paintedSerial_ = frameSerial_;
@@ -1122,16 +1177,66 @@ private:
             "Time for an unrefreshed phosphor trace to lose half its brightness"));
     }
 
+    /** Show a save dialog containing the shared capture-border option. */
+    QString selectCaptureFile(const QString &title,
+                              const QString &suggestedFilename,
+                              const QString &nameFilter,
+                              const QString &defaultSuffix,
+                              bool *addBorder) {
+        QFileDialog dialog(this, title, suggestedFilename, nameFilter);
+        dialog.setAcceptMode(QFileDialog::AcceptSave);
+        dialog.setFileMode(QFileDialog::AnyFile);
+        dialog.setDefaultSuffix(defaultSuffix);
+        // Native file pickers cannot host application-specific controls.
+        dialog.setOption(QFileDialog::DontUseNativeDialog, true);
+
+        QList<QUrl> sidebarUrls;
+        const std::array locations = {
+            QStandardPaths::HomeLocation,
+            QStandardPaths::DownloadLocation,
+            QStandardPaths::DesktopLocation,
+            QStandardPaths::DocumentsLocation,
+        };
+        for (const auto location : locations) {
+            for (const QString &path :
+                 QStandardPaths::standardLocations(location)) {
+                const QUrl url = QUrl::fromLocalFile(path);
+                if (!path.isEmpty() && !sidebarUrls.contains(url)) {
+                    sidebarUrls.append(url);
+                }
+            }
+        }
+        dialog.setSidebarUrls(sidebarUrls);
+
+        auto *borderCheckBox = new QCheckBox(
+            QStringLiteral("Add 12 px black border"), &dialog);
+        borderCheckBox->setChecked(
+            QSettings().value(QStringLiteral("capture/addBorder"), false)
+                .toBool());
+        dialog.layout()->addWidget(borderCheckBox);
+
+        if (dialog.exec() != QDialog::Accepted ||
+            dialog.selectedFiles().isEmpty()) {
+            return {};
+        }
+        *addBorder = borderCheckBox->isChecked();
+        QSettings().setValue(QStringLiteral("capture/addBorder"), *addBorder);
+        return dialog.selectedFiles().constFirst();
+    }
+
     /** Ask for a filename and save the latest unscaled framebuffer. */
     void saveScreenshot() {
         if (!screen_->hasFrame()) {
             return;
         }
-        const QString filename = QFileDialog::getSaveFileName(
-            this, QStringLiteral("Save framebuffer"),
+        bool addBorder = false;
+        const QString filename = selectCaptureFile(
+            QStringLiteral("Save framebuffer"),
             QStringLiteral("p2000m-screen.png"),
-            QStringLiteral("PNG image (*.png);;Bitmap image (*.bmp)"));
-        if (!filename.isEmpty() && !screen_->saveFrame(filename)) {
+            QStringLiteral("PNG image (*.png);;Bitmap image (*.bmp)"),
+            QStringLiteral("png"), &addBorder);
+        if (!filename.isEmpty() &&
+            !screen_->saveFrame(filename, addBorder)) {
             QMessageBox::warning(
                 this, QStringLiteral("Save screenshot"),
                 QStringLiteral("The screenshot could not be written."));
@@ -1215,10 +1320,12 @@ private:
             return;
         }
 
-        QString filename = QFileDialog::getSaveFileName(
-            this, QStringLiteral("Record P2000M screen"),
+        bool addBorder = false;
+        QString filename = selectCaptureFile(
+            QStringLiteral("Record P2000M screen"),
             QDir::home().filePath(QStringLiteral("p2000m-recording.mp4")),
-            QStringLiteral("MPEG-4 video (*.mp4)"));
+            QStringLiteral("MPEG-4 video (*.mp4)"),
+            QStringLiteral("mp4"), &addBorder);
         if (filename.isEmpty()) {
             return;
         }
@@ -1227,6 +1334,11 @@ private:
             filename += QStringLiteral(".mp4");
         }
 
+        const int recordingWidth =
+            kSourceWidth + (addBorder ? 2 * kCaptureBorderWidth : 0);
+        const int recordingHeight =
+            kVgaHeight + (addBorder ? 2 * kCaptureBorderWidth : 0);
+
         ffmpegProcess_.setProgram(ffmpeg);
         ffmpegProcess_.setArguments({
             QStringLiteral("-hide_banner"),
@@ -1234,7 +1346,8 @@ private:
             QStringLiteral("-nostdin"), QStringLiteral("-y"),
             QStringLiteral("-f"), QStringLiteral("rawvideo"),
             QStringLiteral("-pixel_format"), QStringLiteral("bgra"),
-            QStringLiteral("-video_size"), QStringLiteral("640x480"),
+            QStringLiteral("-video_size"),
+            QStringLiteral("%1x%2").arg(recordingWidth).arg(recordingHeight),
             QStringLiteral("-framerate"), QStringLiteral("25.047"),
             QStringLiteral("-i"), QStringLiteral("pipe:0"),
             QStringLiteral("-an"),
@@ -1256,6 +1369,7 @@ private:
         }
 
         recordingFile_ = filename;
+        recordingBorder_ = addBorder;
         recordedFrames_ = 0;
         recordingDroppedFrames_ = 0;
         recordingWriteFailed_ = false;
@@ -1287,16 +1401,20 @@ private:
             return;
         }
 
-        const qint64 frameBytes =
+        const qint64 sourceFrameBytes =
             static_cast<qint64>(kSourceWidth) * kVgaHeight * 4;
         if (frame.format() != QImage::Format_RGB32 ||
             frame.width() != kSourceWidth || frame.height() != kVgaHeight ||
             frame.bytesPerLine() != kSourceWidth * 4 ||
-            frame.sizeInBytes() != frameBytes) {
+            frame.sizeInBytes() != sourceFrameBytes) {
             recordingWriteFailed_ = true;
             stopRecording();
             return;
         }
+
+        const QImage outputFrame =
+            recordingBorder_ ? addCaptureBorder(frame) : frame;
+        const qint64 frameBytes = outputFrame.sizeInBytes();
 
         // Bounded buffering keeps a slow encoder from consuming unbounded RAM.
         // Dropping a whole frame is safe because raw-video frame boundaries
@@ -1306,7 +1424,8 @@ private:
             return;
         }
         const qint64 written = ffmpegProcess_.write(
-            reinterpret_cast<const char *>(frame.constBits()), frameBytes);
+            reinterpret_cast<const char *>(outputFrame.constBits()),
+            frameBytes);
         if (written != frameBytes) {
             recordingWriteFailed_ = true;
             stopRecording();
@@ -2294,6 +2413,8 @@ private:
     bool firmwareTimingAvailable_ = false;
     /** Whether new reconstructed frames should be sent to FFmpeg. */
     bool recording_ = false;
+    /** Whether the active recording includes a 12 px black margin. */
+    bool recordingBorder_ = false;
     /** Whether viewer-side CRT phosphor persistence is enabled. */
     bool afterglowEnabled_ = false;
     /** Persisted brightness half-life for CRT phosphor persistence. */
@@ -2340,6 +2461,9 @@ private:
 
 /** Initialize Qt application metadata and run the viewer event loop. */
 int main(int argc, char *argv[]) {
+#ifdef _WIN32
+    QApplication::setStyle(QStringLiteral("windowsvista"));
+#endif
     QApplication application(argc, argv);
     QApplication::setApplicationName(QStringLiteral("P2000M VID2VGA Viewer"));
     QApplication::setApplicationVersion(

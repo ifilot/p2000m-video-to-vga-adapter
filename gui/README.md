@@ -38,9 +38,12 @@ binary stream on the same COM port.
 
 The menu bar also provides connection controls, lossless framebuffer
 screenshots, and MP4 recordings under **File**, plus application and license
-information under **Help > About**. Recordings contain the reconstructed
-640 x 480 monitor image and are encoded by a separate FFmpeg process, keeping
-video compression away from the serial and painting paths. **View > Scaling
+information under **Help > About**. Both save dialogs offer a remembered option
+to add a 12 px black border, producing a 664 x 504 image instead of the native
+640 x 480 frame. Recordings are encoded by a separate FFmpeg process, keeping
+video compression away from the serial and painting paths. The live monitor
+viewport has a permanent 12 px black bezel with rounded outer and screen
+corners; this presentation-only surround is not included in captures. **View > Scaling
 Filter** switches between smooth anti-aliased resizing and sharp
 nearest-neighbor pixels. Pixel-perfect integer scaling avoids uneven pixel
 widths. **View > CRT Phosphor Afterglow** optionally retains decaying light

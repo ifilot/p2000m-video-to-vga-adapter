@@ -9,6 +9,14 @@ All notable changes to the P2000M VID2VGA firmware are documented here. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and releases use [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] - 2026-08-12
+
+### Added
+
+- A remembered save-dialog option to add a 12 px black border around
+  screenshots and MP4 recordings.
+- A permanent 12 px rounded bezel around the viewer's live monitor viewport.
+
 ## [0.3.1] - 2026-08-08
 
 ### Added
@@ -152,6 +160,7 @@ and releases use [Semantic Versioning](https://semver.org/).
 - Pico 2/RP2350 project defaults and an early, actionable error when the Arm
   cross-compiler is not installed.
 
+[0.3.2]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.1.0...v0.2.0
