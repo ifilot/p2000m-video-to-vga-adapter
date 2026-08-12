@@ -109,7 +109,6 @@ jobs:
         with:
           version: ${{ env.QT_VERSION }}
           arch: ${{ matrix.qt_arch }}
-          tools: tools_ifw
           cache: true
 
       - name: Build and verify bundled FFmpeg on Windows
@@ -208,6 +207,32 @@ jobs:
           & gui/packaging/create_windows_installer.ps1 `
             -Stage stage -Version $version -Output $installer `
             -WorkDirectory installer-work
+          7z t $installer
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows installer integrity check failed."
+          }
+
+          $installer = (Resolve-Path $installer).Path
+          $smokeDirectory = Join-Path $env:RUNNER_TEMP "p2000m-installer-smoke"
+          $firstInstall = Start-Process -FilePath $installer -Wait -PassThru `
+            -ArgumentList @("/S", "/D=$smokeDirectory")
+          if ($firstInstall.ExitCode -ne 0 -or
+              -not (Test-Path "$smokeDirectory/p2000m-vid2vga-viewer.exe")) {
+            throw "Fresh Windows installation smoke test failed."
+          }
+
+          $upgrade = Start-Process -FilePath $installer -Wait -PassThru `
+            -ArgumentList @("/S", "/D=$smokeDirectory")
+          if ($upgrade.ExitCode -ne 0) {
+            throw "Same-directory Windows upgrade smoke test failed."
+          }
+
+          $uninstaller = Join-Path $smokeDirectory "uninstall.exe"
+          $uninstall = Start-Process -FilePath $uninstaller -Wait -PassThru `
+            -ArgumentList "/S"
+          if ($uninstall.ExitCode -ne 0 -or (Test-Path $smokeDirectory)) {
+            throw "Windows uninstaller smoke test failed."
+          }
 
       - name: Package Linux AppImage
         if: matrix.platform == 'linux'

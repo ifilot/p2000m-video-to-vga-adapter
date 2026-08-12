@@ -10,51 +10,50 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Stage = (Resolve-Path $Stage).Path
-$templateDirectory = Join-Path $PSScriptRoot "windows-installer"
-$configDirectory = Join-Path $WorkDirectory "config"
-$packagesDirectory = Join-Path $WorkDirectory "packages"
-$componentId = "nl.ivofilot.p2000m.vid2vga.viewer"
-if ($componentId -notmatch '^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$') {
-    throw "Invalid Qt Installer Framework component ID: $componentId"
-}
-$packageDirectory = Join-Path $packagesDirectory $componentId
-$metaDirectory = Join-Path $packageDirectory "meta"
-$dataDirectory = Join-Path $packageDirectory "data"
+$Output = [System.IO.Path]::GetFullPath($Output)
+$WorkDirectory = [System.IO.Path]::GetFullPath($WorkDirectory)
+$installerScript = Join-Path $PSScriptRoot "windows-installer/setup.nsi"
+$assetsDirectory = (Resolve-Path (Join-Path $PSScriptRoot "../assets")).Path
+$licenseFile = (Resolve-Path (Join-Path $Stage "licenses/GPL-3.0-or-later.txt")).Path
+$outputDirectory = Split-Path $Output -Parent
 
-# These directories contain generated input only. Recreate them so a renamed or
-# removed component cannot remain in a reused work directory.
-foreach ($generatedDirectory in @($configDirectory, $packagesDirectory)) {
-    if (Test-Path $generatedDirectory) {
-        Remove-Item $generatedDirectory -Recurse -Force
+if ($Version -notmatch '^\d+\.\d+\.\d+$') {
+    throw "Invalid semantic version: $Version"
+}
+if ([System.IO.Path]::GetExtension($Output) -ne ".exe") {
+    throw "Windows installer output must have an .exe extension: $Output"
+}
+
+New-Item -ItemType Directory -Force $WorkDirectory, $outputDirectory | Out-Null
+
+$compiler = Get-Command makensis.exe -ErrorAction SilentlyContinue
+if ($compiler) {
+    $compilerPath = $compiler.Source
+} else {
+    $compilerPath = $null
+    foreach ($knownCompiler in @(
+        (Join-Path ${env:ProgramFiles(x86)} "NSIS/makensis.exe"),
+        (Join-Path $env:ProgramFiles "NSIS/makensis.exe")
+    )) {
+        if (Test-Path $knownCompiler -PathType Leaf) {
+            $compilerPath = $knownCompiler
+            break
+        }
+    }
+    if (-not $compilerPath) {
+        throw "NSIS compiler makensis.exe was not found."
     }
 }
-New-Item -ItemType Directory -Force $configDirectory, $metaDirectory, $dataDirectory | Out-Null
-Copy-Item (Join-Path $Stage "*") $dataDirectory -Recurse -Force
-Copy-Item (Join-Path $PSScriptRoot "../assets/p2000m-vid2vga-viewer.ico") $configDirectory
-Copy-Item (Join-Path $PSScriptRoot "../assets/p2000m-vid2vga-viewer-icon.png") $configDirectory
-Copy-Item (Join-Path $templateDirectory "installscript.qs") $metaDirectory
 
-$config = (Get-Content (Join-Path $templateDirectory "config.xml") -Raw -Encoding UTF8).
-    Replace("@VERSION@", $Version)
-Set-Content (Join-Path $configDirectory "config.xml") $config -Encoding UTF8
-
-$package = (Get-Content (Join-Path $templateDirectory "package.xml") -Raw -Encoding UTF8).
-    Replace("@COMPONENT_ID@", $componentId).
-    Replace("@VERSION@", $Version).
-    Replace("@RELEASE_DATE@", (Get-Date -Format "yyyy-MM-dd"))
-Set-Content (Join-Path $metaDirectory "package.xml") $package -Encoding UTF8
-
-Copy-Item (Join-Path $Stage "licenses/GPL-3.0-or-later.txt") `
-    (Join-Path $metaDirectory "LICENSE-GPL-3.0-or-later.txt")
-Copy-Item (Join-Path $Stage "licenses/ffmpeg/FFMPEG-COPYING.GPLv3") $metaDirectory
-Copy-Item (Join-Path $Stage "licenses/ffmpeg/X264-COPYING") $metaDirectory
-
-$binaryCreator = (Get-Command binarycreator -ErrorAction Stop).Source
-New-Item -ItemType Directory -Force (Split-Path $Output -Parent) | Out-Null
-& $binaryCreator --offline-only -c (Join-Path $configDirectory "config.xml") `
-    -p $packagesDirectory $Output
+& $compilerPath `
+    "/DStage=$Stage" `
+    "/DAppVersion=$Version" `
+    "/DAssetsDirectory=$assetsDirectory" `
+    "/DLicenseFile=$licenseFile" `
+    "/DInstallerOutput=$Output" `
+    $installerScript
 if ($LASTEXITCODE -ne 0) {
-    throw "binarycreator failed with exit code $LASTEXITCODE"
+    throw "makensis failed with exit code $LASTEXITCODE"
 }
 if (-not (Test-Path $Output -PathType Leaf) -or (Get-Item $Output).Length -eq 0) {
     throw "Windows installer was not created: $Output"

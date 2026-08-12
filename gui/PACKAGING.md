@@ -20,11 +20,13 @@ SHA-256, and performs a real MP4 encoding smoke test. Packages also contain the
 exact FFmpeg and x264 source archives, license texts, checksums, configure
 arguments, and runtime version report under `licenses/ffmpeg`.
 
-The Windows installer is produced with Qt Installer Framework. It installs the
-complete application under Program Files, creates Start-menu and desktop
-shortcuts, displays the project, FFmpeg, and x264 license agreements, and
-provides a maintenance tool for removal. The ZIP remains available for users
-who specifically need a no-install portable copy.
+The Windows installer is produced with NSIS. It installs the complete
+application under Program Files, creates Start-menu and desktop shortcuts, and
+provides a conventional Windows uninstaller. Its stable application identity
+allows newer releases to upgrade the existing directory in place. The first
+such upgrade also removes the broken Qt Installer Framework 0.3.0/0.3.1
+maintenance metadata and registration. The ZIP remains available for users who
+specifically need a no-install portable copy.
 
 ## Continuous package validation
 
@@ -102,8 +104,8 @@ windeployqt6 --release --compiler-runtime --no-translations \
 ```
 
 Archive the contents of `stage`, not the directory itself. To build the
-graphical installer, install Qt Installer Framework, ensure `binarycreator` is
-on `PATH`, and run:
+graphical installer, install NSIS 3, ensure `makensis.exe` is on `PATH`, and
+run:
 
 ```powershell
 gui/packaging/create_windows_installer.ps1 `
@@ -199,8 +201,8 @@ stored as protected GitHub Actions secrets.
 - FFmpeg and x264 are built from the versions and hashes in `ffmpeg.env`.
   Updating either dependency requires updating its version/revision, archive
   URL, SHA-256, notices, and the bundled source archive as one reviewed change.
-- The Windows installer presents all applicable GPL agreements before
-  installation. Other formats place the same texts and exact corresponding
-  sources beside the installed application.
+- The Windows installer presents the viewer's GPL agreement before
+  installation. All formats place the complete third-party license set and
+  exact corresponding sources beside the installed application.
 - The release workflow publishes exactly the assets tested on `master`; it
   never substitutes binaries produced by the tag event.

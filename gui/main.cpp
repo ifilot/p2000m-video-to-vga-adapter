@@ -72,6 +72,7 @@
 #include "metric_graph_widget.h"
 #include "p2000m_packbits.h"
 #include "phosphor_afterglow.h"
+#include "signal_loss_screen.h"
 
 namespace {
 
@@ -94,6 +95,8 @@ constexpr int kSourceWidth = 640;
 constexpr int kSourceHeight = 288;
 /** Active line count reproduced by the VGA monitor view. */
 constexpr int kVgaHeight = 480;
+/** Match the firmware's missing-source-frame watchdog interval. */
+constexpr qint64 kSignalLossTimeoutMs = 100;
 /** Fixed black bezel surrounding the live monitor viewport. */
 constexpr int kMonitorBezelWidth = 12;
 /** Corner radius of the live monitor's outer bezel. */
@@ -1490,6 +1493,7 @@ private:
         candidateIndex_ = 0;
         unavailableCandidates_.clear();
         probedCandidateCount_ = 0;
+        firmwareVersion_.clear();
         if (candidates_.isEmpty()) {
             connectButton_->setEnabled(true);
             connectAction_->setEnabled(true);
@@ -1719,6 +1723,13 @@ private:
 
         if (state_ == State::Probing) {
             if (receiveBuffer_.contains("P2000M VID2VGA firmware")) {
+                const QRegularExpression versionPattern(QStringLiteral(
+                    "P2000M VID2VGA firmware (v[0-9]+(?:\\.[0-9]+){2})"));
+                const QRegularExpressionMatch versionMatch =
+                    versionPattern.match(QString::fromLatin1(receiveBuffer_));
+                if (versionMatch.hasMatch()) {
+                    firmwareVersion_ = versionMatch.captured(1);
+                }
                 receiveBuffer_.clear();
                 state_ = State::AwaitingScreenMode;
                 stateClock_.restart();
@@ -1766,6 +1777,8 @@ private:
                 smoothedFirmwarePrepareUs_ = 0.0;
                 smoothedFirmwareEncodeUs_ = 0.0;
                 frameClock_.invalidate();
+                streamFrameClock_.start();
+                signalLossDisplayed_ = false;
                 screen_->resetAfterglow();
                 clearStatisticsGraphs();
                 connectButton_->setEnabled(false);
@@ -1843,7 +1856,28 @@ private:
 
         if (state_ == State::Streaming) {
             processFrames();
+            updateSignalPresence();
         }
+    }
+
+    /** Replace a frozen source frame after the firmware's watchdog interval. */
+    void updateSignalPresence() {
+        if (signalLossDisplayed_ || !streamFrameClock_.isValid() ||
+            streamFrameClock_.elapsed() <= kSignalLossTimeoutMs) {
+            return;
+        }
+
+        signalLossDisplayed_ = true;
+        screen_->resetAfterglow();
+        const QString version = firmwareVersion_.isEmpty()
+                                    ? QStringLiteral("v%1").arg(
+                                          QStringLiteral(P2000M_VIEWER_VERSION))
+                                    : firmwareVersion_;
+        screen_->setFrame(p2000m::renderSignalLossScreen(version));
+        screenshotAction_->setEnabled(true);
+        statusBar()->showMessage(
+            QStringLiteral("%1  •  SIGNAL LOST  •  waiting for HSYNC + VSYNC")
+                .arg(serial_.name()));
     }
 
     /** Parse, validate, render, and account for every complete queued record. */
@@ -1940,6 +1974,12 @@ private:
                         .arg(sequence));
                 requestFrame();
                 continue;
+            }
+
+            streamFrameClock_.restart();
+            if (signalLossDisplayed_) {
+                signalLossDisplayed_ = false;
+                screen_->resetAfterglow();
             }
 
             // Grant the next frame before doing GUI-side pixel expansion so
@@ -2270,6 +2310,8 @@ private:
     /** Return the adapter to console mode and close the COM port. */
     void disconnectFromAdapter(bool userRequested) {
         autoReconnect_ = !userRequested;
+        streamFrameClock_.invalidate();
+        signalLossDisplayed_ = false;
         if (recording_) {
             stopRecording();
         }
@@ -2294,6 +2336,8 @@ private:
 
     /** Reset connection controls after an I/O failure and schedule discovery. */
     void handleConnectionLoss() {
+        streamFrameClock_.invalidate();
+        signalLossDisplayed_ = false;
         if (recording_) {
             stopRecording();
         }
@@ -2369,6 +2413,8 @@ private:
     QElapsedTimer stateClock_;
     /** Interval clock for validated frame arrivals. */
     QElapsedTimer frameClock_;
+    /** Time since the latest valid source frame or screen-mode announcement. */
+    QElapsedTimer streamFrameClock_;
     /** Accumulation clock for Windows-received byte throughput. */
     QElapsedTimer rxClock_;
     /** Elapsed capture time used for the rolling CRC-error rate. */
@@ -2395,6 +2441,8 @@ private:
     int probedCandidateCount_ = 0;
     /** Mixed text/binary receive accumulator consumed by the active state. */
     QByteArray receiveBuffer_;
+    /** Semantic firmware version parsed during adapter identification. */
+    QString firmwareVersion_;
     /** Current connection and protocol phase. */
     State state_ = State::Disconnected;
     /** Whether loss or failed discovery should schedule another pass. */
@@ -2411,6 +2459,8 @@ private:
     bool lastSequenceValid_ = false;
     /** Whether protocol flag bit 2 supplied firmware timing fields. */
     bool firmwareTimingAvailable_ = false;
+    /** Whether the firmware-matching signal-loss card is currently visible. */
+    bool signalLossDisplayed_ = false;
     /** Whether new reconstructed frames should be sent to FFmpeg. */
     bool recording_ = false;
     /** Whether the active recording includes a 12 px black margin. */

@@ -16,6 +16,14 @@ and releases use [Semantic Versioning](https://semver.org/).
 - A remembered save-dialog option to add a 12 px black border around
   screenshots and MP4 recordings.
 - A permanent 12 px rounded bezel around the viewer's live monitor viewport.
+- Viewer-side 100 ms source-signal loss detection with the same status card as
+  the physical VGA output and automatic recovery when valid frames resume.
+
+### Fixed
+
+- Replaced the Windows Qt IFW offline installer with an upgrade-aware NSIS
+  package whose uninstaller remains usable and which accepts the existing
+  installation directory when installing a newer release.
 
 ## [0.3.1] - 2026-08-08
 

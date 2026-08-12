@@ -30,6 +30,8 @@ set(P2000M_VIEWER_SOURCES
     metric_graph_widget.h
     phosphor_afterglow.cpp
     phosphor_afterglow.h
+    signal_loss_screen.cpp
+    signal_loss_screen.h
     resources.qrc
 )
 
@@ -184,4 +186,19 @@ if(BUILD_TESTING)
         Qt6::Gui
     )
     add_test(NAME phosphor-afterglow COMMAND p2000m-phosphor-afterglow-test)
+
+    add_executable(p2000m-signal-loss-screen-test
+        ../tests/signal_loss_screen_test.cpp
+        signal_loss_screen.cpp
+    )
+    target_include_directories(p2000m-signal-loss-screen-test PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+    )
+    target_compile_options(p2000m-signal-loss-screen-test PRIVATE
+        ${P2000M_WARNING_OPTIONS}
+    )
+    target_link_libraries(p2000m-signal-loss-screen-test PRIVATE
+        Qt6::Gui
+    )
+    add_test(NAME signal-loss-screen COMMAND p2000m-signal-loss-screen-test)
 endif()

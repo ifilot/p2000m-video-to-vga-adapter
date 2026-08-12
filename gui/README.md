@@ -43,7 +43,10 @@ to add a 12 px black border, producing a 664 x 504 image instead of the native
 640 x 480 frame. Recordings are encoded by a separate FFmpeg process, keeping
 video compression away from the serial and painting paths. The live monitor
 viewport has a permanent 12 px black bezel with rounded outer and screen
-corners; this presentation-only surround is not included in captures. **View > Scaling
+corners; this presentation-only surround is not included in captures. If the
+adapter remains connected but valid source frames stop for 100 ms, the viewer
+shows the same `SIGNAL LOST` card as the VGA output and restores the live image
+as soon as capture resumes. **View > Scaling
 Filter** switches between smooth anti-aliased resizing and sharp
 nearest-neighbor pixels. Pixel-perfect integer scaling avoids uneven pixel
 widths. **View > CRT Phosphor Afterglow** optionally retains decaying light
