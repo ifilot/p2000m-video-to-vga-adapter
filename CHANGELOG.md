@@ -9,6 +9,20 @@ All notable changes to the P2000M VID2VGA firmware are documented here. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and releases use [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-08-12
+
+### Added
+
+- Optional `low`, `medium`, and `high` phosphor-grain levels which dim a
+  source-frame-synchronous random selection of foreground pixels by one RGB444
+  DAC step without modifying the captured one-bit framebuffer.
+- Persistent phosphor-grain configuration through the USB console and the
+  viewer's adapter dialog, with automatic migration of older saved settings.
+- Viewer reproduction of the firmware grain pattern using spare screen-record
+  style bits, while retaining compatibility with earlier firmware.
+- Viewer foreground presets for Matrix green, retro amber, and warm off-white,
+  while retaining the unrestricted custom color picker.
+
 ## [0.3.2] - 2026-08-12
 
 ### Added
@@ -170,6 +184,7 @@ and releases use [Semantic Versioning](https://semver.org/).
 - Pico 2/RP2350 project defaults and an early, actionable error when the Arm
   cross-compiler is not installed.
 
+[0.4.0]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.2.0...v0.3.0

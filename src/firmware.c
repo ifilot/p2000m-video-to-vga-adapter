@@ -21,6 +21,7 @@
 #include "hardware/vreg.h"
 #include "p2000m_capture.h"
 #include "p2000m_packbits.h"
+#include "p2000m_phosphor_noise.h"
 #include "pico/flash.h"
 #include "pico/multicore.h"
 #include "pico/scanvideo.h"
@@ -89,7 +90,7 @@ enum {
     /** File-format signature: ASCII "V2GA" when viewed little-endian. */
     SETTINGS_MAGIC = 0x41473256,
     /** On-flash settings structure version. */
-    SETTINGS_VERSION = 2,
+    SETTINGS_VERSION = 3,
     /** Maximum time to coordinate each multicore flash lockout phase. */
     FLASH_LOCKOUT_TIMEOUT_MS = 1000,
     /** Core-start handshake value sent through the multicore FIFO. */
@@ -185,6 +186,15 @@ typedef enum {
     USB_SCREEN_MODE,
 } usb_interface_mode_t;
 
+enum {
+    /** Persisted VGA overlay enable bit. */
+    DISPLAY_FLAG_BORDER_ENABLED = 1u << 0,
+    /** Persisted VGA dotted-border selection bit. */
+    DISPLAY_FLAG_BORDER_DOTTED = 1u << 1,
+    /** Persisted full-height vertical-scaling selection bit. */
+    DISPLAY_FLAG_VERTICAL_STRETCH = 1u << 2,
+};
+
 /** User-selectable colors and geometry overlay for one VGA frame. */
 typedef struct {
     /** Foreground color as entered by the user, in 0xRRGGBB form. */
@@ -199,6 +209,8 @@ typedef struct {
     bool border_dotted;
     /** Whether to scale 288 source lines to all 480 active VGA lines. */
     bool vertical_stretch_enabled;
+    /** Density of one-DAC-step phosphor-grain dimming on foreground pixels. */
+    uint8_t phosphor_noise_level;
 } display_style_t;
 
 /** Versioned, checksummed display settings stored redundantly in flash. */
@@ -217,14 +229,14 @@ typedef struct {
     uint32_t background_rgb;
     /** Saved border color in 0xRRGGBB form. */
     uint32_t border_rgb;
-    /** Saved border flag encoded as zero or one. */
-    uint8_t border_enabled;
-    /** Saved dotted-border flag encoded as zero or one. */
-    uint8_t border_dotted;
-    /** Saved vertical-scaling flag encoded as zero or one. */
-    uint8_t vertical_stretch_enabled;
+    /** Packed DISPLAY_FLAG_* values. */
+    uint8_t display_flags;
+    /** Saved p2000m_phosphor_noise_level_t value. */
+    uint8_t phosphor_noise_level;
     /** Saved manual sampling-phase trim from -4 through +4 ticks. */
     int8_t manual_phase_ticks;
+    /** Reserved for a future compatible settings addition. */
+    uint8_t reserved;
     /** CRC-32 of every preceding byte in this structure. */
     uint32_t checksum;
 } persisted_settings_t;
@@ -233,6 +245,27 @@ _Static_assert(sizeof(persisted_settings_t) == 32u,
                "Persisted settings format must remain exactly 32 bytes");
 _Static_assert(offsetof(persisted_settings_t, checksum) == 28u,
                "Persisted settings checksum must remain at byte 28");
+
+/** Version-two record retained solely to migrate existing saved settings. */
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t length;
+    uint32_t sequence;
+    uint32_t foreground_rgb;
+    uint32_t background_rgb;
+    uint32_t border_rgb;
+    uint8_t border_enabled;
+    uint8_t border_dotted;
+    uint8_t vertical_stretch_enabled;
+    int8_t manual_phase_ticks;
+    uint32_t checksum;
+} persisted_settings_v2_t;
+
+_Static_assert(sizeof(persisted_settings_v2_t) == 32u,
+               "Version-two settings format must remain exactly 32 bytes");
+_Static_assert(offsetof(persisted_settings_v2_t, checksum) == 28u,
+               "Version-two settings checksum must remain at byte 28");
 
 /** Version-one record retained solely to migrate existing saved settings. */
 typedef struct {
@@ -438,6 +471,7 @@ static display_style_t default_display_style(void) {
         .border_enabled = false,
         .border_dotted = false,
         .vertical_stretch_enabled = false,
+        .phosphor_noise_level = P2000M_PHOSPHOR_NOISE_OFF,
     };
     return defaults;
 }
@@ -495,13 +529,33 @@ static bool settings_record_is_valid(const persisted_settings_t *record) {
         (record->foreground_rgb & 0xff000000u) == 0u &&
         (record->background_rgb & 0xff000000u) == 0u &&
         (record->border_rgb & 0xff000000u) == 0u &&
+        (record->display_flags & ~(DISPLAY_FLAG_BORDER_ENABLED |
+                                   DISPLAY_FLAG_BORDER_DOTTED |
+                                   DISPLAY_FLAG_VERTICAL_STRETCH)) == 0u &&
+        record->phosphor_noise_level <
+            P2000M_PHOSPHOR_NOISE_LEVEL_COUNT &&
+        record->manual_phase_ticks >= -4 &&
+        record->manual_phase_ticks <= 4 &&
+        record->checksum ==
+            settings_crc32(record, offsetof(persisted_settings_t, checksum));
+}
+
+/** Validate a version-two flash record for settings migration. */
+static bool settings_v2_record_is_valid(
+    const persisted_settings_v2_t *record) {
+    return record->magic == SETTINGS_MAGIC &&
+        record->version == 2u &&
+        record->length == sizeof(*record) &&
+        (record->foreground_rgb & 0xff000000u) == 0u &&
+        (record->background_rgb & 0xff000000u) == 0u &&
+        (record->border_rgb & 0xff000000u) == 0u &&
         record->border_enabled <= 1u &&
         record->border_dotted <= 1u &&
         record->vertical_stretch_enabled <= 1u &&
         record->manual_phase_ticks >= -4 &&
         record->manual_phase_ticks <= 4 &&
-        record->checksum ==
-            settings_crc32(record, offsetof(persisted_settings_t, checksum));
+        record->checksum == settings_crc32(
+            record, offsetof(persisted_settings_v2_t, checksum));
 }
 
 /**
@@ -551,6 +605,8 @@ static bool load_saved_configuration(display_style_t *style) {
     for (unsigned slot = 0; slot < SETTINGS_SLOT_COUNT; ++slot) {
         const persisted_settings_t *candidate = settings_slot_record(slot);
         const bool valid = settings_record_is_valid(candidate) ||
+            settings_v2_record_is_valid(
+                (const persisted_settings_v2_t *)candidate) ||
             settings_v1_record_is_valid(
                 (const persisted_settings_v1_t *)candidate);
         if (valid &&
@@ -569,11 +625,25 @@ static bool load_saved_configuration(display_style_t *style) {
     style->background_rgb = newest_record->background_rgb;
     if (newest_record->version == SETTINGS_VERSION) {
         style->border_rgb = newest_record->border_rgb;
-        style->border_enabled = newest_record->border_enabled != 0u;
-        style->border_dotted = newest_record->border_dotted != 0u;
+        style->border_enabled =
+            (newest_record->display_flags & DISPLAY_FLAG_BORDER_ENABLED) != 0u;
+        style->border_dotted =
+            (newest_record->display_flags & DISPLAY_FLAG_BORDER_DOTTED) != 0u;
         style->vertical_stretch_enabled =
-            newest_record->vertical_stretch_enabled != 0u;
+            (newest_record->display_flags &
+             DISPLAY_FLAG_VERTICAL_STRETCH) != 0u;
+        style->phosphor_noise_level = newest_record->phosphor_noise_level;
         saved_manual_phase_ticks = newest_record->manual_phase_ticks;
+    } else if (newest_record->version == 2u) {
+        const persisted_settings_v2_t *legacy =
+            (const persisted_settings_v2_t *)newest_record;
+        style->border_rgb = legacy->border_rgb;
+        style->border_enabled = legacy->border_enabled != 0u;
+        style->border_dotted = legacy->border_dotted != 0u;
+        style->vertical_stretch_enabled =
+            legacy->vertical_stretch_enabled != 0u;
+        style->phosphor_noise_level = P2000M_PHOSPHOR_NOISE_OFF;
+        saved_manual_phase_ticks = legacy->manual_phase_ticks;
     } else {
         const persisted_settings_v1_t *legacy =
             (const persisted_settings_v1_t *)newest_record;
@@ -583,6 +653,7 @@ static bool load_saved_configuration(display_style_t *style) {
         style->border_dotted = false;
         style->vertical_stretch_enabled =
             legacy->vertical_stretch_enabled != 0u;
+        style->phosphor_noise_level = P2000M_PHOSPHOR_NOISE_OFF;
         saved_manual_phase_ticks = legacy->manual_phase_ticks;
     }
     saved_settings_slot = newest_slot;
@@ -1095,6 +1166,37 @@ static bool map_vga_line_to_source(unsigned vga_y, bool stretch,
 }
 
 /**
+ * @brief Dim a sparse, deterministic selection of lit scanline pixels.
+ *
+ * The source sequence, rather than the asynchronous VGA frame number, seeds
+ * the pattern. A source frame repeated to bridge 50.1 Hz input to 60 Hz output
+ * therefore remains visually stable. No background pixel is ever raised.
+ *
+ * @param tokens Completed raw scanvideo tokens for the active line.
+ * @param line Packed one-bit source line, with foreground represented by one.
+ * @param visible_y Output-line coordinate inside the visible source image.
+ * @param level Selected P2000M_PHOSPHOR_NOISE_* density.
+ * @param dimmed_foreground One-DAC-step-dimmer RGB444 foreground color.
+ */
+static void apply_phosphor_noise(uint16_t *tokens, const uint32_t *line,
+                                 unsigned visible_y, uint8_t level,
+                                 uint16_t dimmed_foreground) {
+    uint32_t state = p2000m_phosphor_noise_seed(displayed_sequence,
+                                                visible_y);
+    for (unsigned word_index = 0;
+         word_index < DECODED_WORDS_PER_LINE; ++word_index) {
+        uint32_t selected = line[word_index] &
+            p2000m_phosphor_noise_mask(level, &state);
+        while (selected != 0u) {
+            const unsigned source_bit = (unsigned)__builtin_ctz(selected);
+            const unsigned x = word_index * 32u + (31u - source_bit);
+            tokens[x == 0u ? 1u : x + 2u] = dimmed_foreground;
+            selected &= selected - 1u;
+        }
+    }
+}
+
+/**
  * @brief Render one captured P2000M line using the active colors and border.
  *
  * @param scanline_buffer Scanvideo buffer that receives composable tokens.
@@ -1141,6 +1243,18 @@ static void render_source_scanline(scanvideo_scanline_buffer_t *scanline_buffer,
             for (unsigned bit = 0; bit < 8u; ++bit) {
                 *destination++ = pixels[bit];
             }
+        }
+    }
+
+    if (style->phosphor_noise_level != P2000M_PHOSPHOR_NOISE_OFF) {
+        const uint16_t foreground =
+            rgb888_to_scanvideo(style->foreground_rgb);
+        const uint16_t dimmed_foreground =
+            p2000m_phosphor_noise_dim_rgb444(foreground);
+        if (dimmed_foreground != foreground) {
+            apply_phosphor_noise(tokens, line, visible_y,
+                                 style->phosphor_noise_level,
+                                 dimmed_foreground);
         }
     }
 
@@ -1595,7 +1709,7 @@ static void abort_screen_transfer(void) {
  * Type one carries the RP2350's native little-endian array of 32-bit words;
  * type two independently PackBits-encodes those same bytes. In each numeric
  * word, the leftmost pixel is bit 31 and foreground is one. Display colors and
- * geometry flags let the host reproduce the VGA view.
+ * visual-style flags let the host reproduce the VGA view.
  */
 static void build_screen_frame_header(uint32_t sequence,
                                       const uint32_t *frame) {
@@ -1606,6 +1720,7 @@ static void build_screen_frame_header(uint32_t sequence,
         STYLE_BORDER_ENABLED = 1u << 0,
         STYLE_BORDER_DOTTED = 1u << 1,
         STYLE_VERTICAL_STRETCH = 1u << 2,
+        STYLE_PHOSPHOR_NOISE_SHIFT = 3,
     };
     const uint64_t prepare_started = time_us_64();
     const display_style_t style = current_display_style();
@@ -1636,6 +1751,8 @@ static void build_screen_frame_header(uint32_t sequence,
     if (style.vertical_stretch_enabled) {
         style_flags |= STYLE_VERTICAL_STRETCH;
     }
+    style_flags |=
+        (uint32_t)style.phosphor_noise_level << STYLE_PHOSPHOR_NOISE_SHIFT;
 
     memset(screen_frame_header, 0, sizeof(screen_frame_header));
     memcpy(screen_frame_header, "P2VF", 4u);
@@ -1855,6 +1972,16 @@ static int save_current_configuration(void) {
     const display_style_t style = current_display_style();
     p2000m_capture_stats_t capture;
     p2000m_capture_get_stats(&capture);
+    uint8_t display_flags = 0u;
+    if (style.border_enabled) {
+        display_flags |= DISPLAY_FLAG_BORDER_ENABLED;
+    }
+    if (style.border_dotted) {
+        display_flags |= DISPLAY_FLAG_BORDER_DOTTED;
+    }
+    if (style.vertical_stretch_enabled) {
+        display_flags |= DISPLAY_FLAG_VERTICAL_STRETCH;
+    }
     const unsigned target_slot = saved_settings_slot < 0
                                      ? 0u
                                      : ((unsigned)saved_settings_slot ^ 1u);
@@ -1866,11 +1993,10 @@ static int save_current_configuration(void) {
         .foreground_rgb = style.foreground_rgb,
         .background_rgb = style.background_rgb,
         .border_rgb = style.border_rgb,
-        .border_enabled = style.border_enabled ? 1u : 0u,
-        .border_dotted = style.border_dotted ? 1u : 0u,
-        .vertical_stretch_enabled =
-            style.vertical_stretch_enabled ? 1u : 0u,
+        .display_flags = display_flags,
+        .phosphor_noise_level = style.phosphor_noise_level,
         .manual_phase_ticks = (int8_t)capture.manual_phase_ticks,
+        .reserved = 0u,
         .checksum = 0u,
     };
     record.checksum =
@@ -1927,6 +2053,40 @@ static int erase_saved_configuration(void) {
     return result;
 }
 
+/** Return the stable console name for one phosphor-noise level. */
+static const char *phosphor_noise_level_name(uint8_t level) {
+    switch (level) {
+        case P2000M_PHOSPHOR_NOISE_LOW:
+            return "low";
+        case P2000M_PHOSPHOR_NOISE_MEDIUM:
+            return "medium";
+        case P2000M_PHOSPHOR_NOISE_HIGH:
+            return "high";
+        default:
+            return "off";
+    }
+}
+
+/** Parse an off/low/medium/high phosphor-noise command argument. */
+static bool parse_phosphor_noise_level(const char *argument,
+                                       uint8_t *level) {
+    if (strcmp(argument, "off") == 0 || strcmp(argument, "0") == 0) {
+        *level = P2000M_PHOSPHOR_NOISE_OFF;
+    } else if (strcmp(argument, "low") == 0 ||
+               strcmp(argument, "1") == 0) {
+        *level = P2000M_PHOSPHOR_NOISE_LOW;
+    } else if (strcmp(argument, "medium") == 0 ||
+               strcmp(argument, "2") == 0) {
+        *level = P2000M_PHOSPHOR_NOISE_MEDIUM;
+    } else if (strcmp(argument, "high") == 0 ||
+               strcmp(argument, "3") == 0) {
+        *level = P2000M_PHOSPHOR_NOISE_HIGH;
+    } else {
+        return false;
+    }
+    return true;
+}
+
 /**
  * @brief Print all current user settings and their persistence state.
  *
@@ -1942,13 +2102,14 @@ static void print_display_settings(void) {
                                                               : "default";
     printf("DISPLAY foreground=#%06" PRIx32 " background=#%06" PRIx32
            " border=%s border_color=#%06" PRIx32
-           " border_style=%s scale=%s phase_trim=%" PRId32
+           " border_style=%s scale=%s noise=%s phase_trim=%" PRId32
            " storage=%s\n",
            style.foreground_rgb, style.background_rgb,
            style.border_enabled ? "on" : "off",
            style.border_rgb,
            style.border_dotted ? "dotted" : "solid",
            style.vertical_stretch_enabled ? "fit-5:3" : "native-1:1",
+           phosphor_noise_level_name(style.phosphor_noise_level),
            capture.manual_phase_ticks,
            storage_state);
 }
@@ -2075,11 +2236,12 @@ static void print_help(void) {
            "  border-color <color>       set the independent border color\n"
            "  border-style solid|dotted  select the border pattern\n"
            "  scale fit|native           5:3 full-height or centered 1:1 lines\n"
+           "  noise off|low|medium|high  foreground phosphor-grain density\n"
            "  fg <name|RRGGBB>           set text/foreground color\n"
            "  bg <name|RRGGBB>           set background color\n"
            "  colors                     list named color presets\n"
            "  defaults                   factory display style (RAM only)\n"
-           "  save                       persist colors, geometry, and phase\n"
+           "  save                       persist display settings and phase\n"
            "  factory-reset              erase saved settings and use defaults\n"
            "  tune | j                   run and report automatic phase tuning\n"
            "  phase +|-|auto             adjust or clear manual phase trim\n"
@@ -2212,6 +2374,21 @@ static void process_usb_command(char *command) {
         }
         publish_display_style(&style);
         print_display_settings();
+    } else if (strcmp(command, "noise") == 0 ||
+               strcmp(command, "grain") == 0) {
+        if (*argument == '\0') {
+            print_display_settings();
+        } else {
+            uint8_t level;
+            if (!parse_phosphor_noise_level(argument, &level)) {
+                printf("Usage: noise off|low|medium|high\n");
+                return;
+            }
+            display_style_t style = current_display_style();
+            style.phosphor_noise_level = level;
+            publish_display_style(&style);
+            print_display_settings();
+        }
     } else if (strcmp(command, "defaults") == 0) {
         const display_style_t defaults = default_display_style();
         publish_display_style(&defaults);

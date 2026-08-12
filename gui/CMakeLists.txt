@@ -3,7 +3,7 @@
 
 cmake_minimum_required(VERSION 3.21)
 
-project(p2000m_vid2vga_viewer VERSION 0.3.2 LANGUAGES CXX)
+project(p2000m_vid2vga_viewer VERSION 0.4.0 LANGUAGES CXX)
 
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/package-version.txt"
     "${PROJECT_VERSION}\n")
@@ -171,6 +171,17 @@ if(BUILD_TESTING)
         ${P2000M_WARNING_OPTIONS}
     )
     add_test(NAME packbits-round-trip COMMAND p2000m-packbits-test)
+
+    add_executable(p2000m-phosphor-noise-test
+        ../tests/phosphor_noise_test.cpp
+    )
+    target_include_directories(p2000m-phosphor-noise-test PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/../src
+    )
+    target_compile_options(p2000m-phosphor-noise-test PRIVATE
+        ${P2000M_WARNING_OPTIONS}
+    )
+    add_test(NAME phosphor-noise COMMAND p2000m-phosphor-noise-test)
 
     add_executable(p2000m-phosphor-afterglow-test
         ../tests/phosphor_afterglow_test.cpp

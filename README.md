@@ -94,8 +94,9 @@ It automatically finds Raspberry Pi Pico CDC ports, verifies the VID2VGA
 firmware, switches the adapter into binary screen mode, and displays complete
 CRC-checked frames. It
 returns the adapter to console mode when Disconnect is selected or the window
-is closed. Its Adapter menu can configure colors, borders, scaling, sampling
-phase, and optional persistent storage through the firmware's console.
+is closed. Its Adapter menu can configure colors, borders, scaling, phosphor
+grain, sampling phase, and optional persistent storage through the firmware's
+console.
 The viewer uses a monitor-derived application icon, places rolling live
 performance graphs beside the screen, and keeps the status bar focused on the
 COM port and source frame number. It can save lossless screenshots and can
@@ -225,11 +226,15 @@ symmetric nearest-neighbour 5:3 scaling: each three-line source group becomes a
 
 The one-bit image selects the configured foreground or background color. The
 optional border is added during scanout, so it can use an independent color and
-a solid or dotted pattern without expanding the one-bit frame buffers. GPIO0
-through GPIO11 carry four bits each of red, green, and blue through the resistor
-DAC, while GPIO12 and GPIO13 generate VGA synchronization. After every 640-pixel
-picture line, the scanout emits black before horizontal blanking so the analog
-RGB outputs return to a defined level before synchronization.
+a solid or dotted pattern without expanding the one-bit frame buffers. Optional
+phosphor grain uses a source-frame-synchronous pseudorandom mask to dim only
+foreground pixels by one RGB444 DAC step. Low, medium, and high select roughly
+one eighth, one quarter, or one half of the lit pixels; background, borders,
+and the captured framebuffer remain unchanged. GPIO0 through GPIO11 carry four
+bits each of red, green, and blue through the resistor DAC, while GPIO12 and
+GPIO13 generate VGA synchronization. After every 640-pixel picture line, the
+scanout emits black before horizontal blanking so the analog RGB outputs return
+to a defined level before synchronization.
 
 ## USB controls
 
@@ -259,14 +264,16 @@ unsolicited statistics.
   a two-pixel-on, two-pixel-off pattern whose gaps reveal the source image.
 - `scale fit`: expand 288 source lines to the full 480-line VGA height.
 - `scale native`: show the original 288 lines between 96-line margins.
+- `noise off`, `noise low`, `noise medium`, or `noise high`: select the density
+  of one-DAC-step phosphor grain applied to foreground pixels.
 - `fg <color>`: set the foreground/text color.
 - `bg <color>`: set the background color, including the top and bottom margins.
 - `colors`: list the named presets.
 - `defaults`: restore white on black, a disabled solid magenta (`#FF00FF`)
-  border, and native 1:1 scaling.
+  border, native 1:1 scaling, and disabled phosphor grain.
 - `save`: explicitly save the current colors, border state, border pattern,
-  scaling mode, and manual phase trim. These settings are restored after reset
-  or power cycling.
+  scaling mode, phosphor-grain level, and manual phase trim. These settings are
+  restored after reset or power cycling.
 - `factory-reset`: erase the saved configuration and immediately restore the
   factory display style and zero manual phase trim.
 - `tune` or `j`: run automatic phase tuning and print all candidate scores.
@@ -302,6 +309,8 @@ transmitted data and its CRC-32 always covers the reconstructed 23,040-byte
 framebuffer. When flags bit 2 is set, header bytes 12 through 15 contain two
 little-endian 16-bit diagnostics: current preparation time and previous-frame
 streaming-encoder CPU time, both in microseconds.
+Header style bits 3 and 4 carry the phosphor-grain level; the packed payload and
+its checksum continue to describe the pristine one-bit source framebuffer.
 
 Frames are independently recoverable and limited to every second decoded
 source sequence (approximately 25.05 frames per second).

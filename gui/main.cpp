@@ -71,6 +71,7 @@
 
 #include "metric_graph_widget.h"
 #include "p2000m_packbits.h"
+#include "p2000m_phosphor_noise.h"
 #include "phosphor_afterglow.h"
 #include "signal_loss_screen.h"
 
@@ -113,6 +114,12 @@ constexpr int kDefaultAfterglowHalfLifeMs = 120;
 constexpr int kMinimumAfterglowHalfLifeMs = 10;
 /** Longest configurable phosphor brightness half-life. */
 constexpr int kMaximumAfterglowHalfLifeMs = 1000;
+/** Green associated with classic Matrix-style monochrome terminals. */
+constexpr quint32 kMatrixGreen = 0x00ff41u;
+/** Warm amber used by many late-1970s and early-1980s monochrome displays. */
+constexpr quint32 kRetroAmber = 0xffb000u;
+/** Slightly warm white which avoids the harshness of full RGB white. */
+constexpr quint32 kWarmOffWhite = 0xf2f0e6u;
 
 /** Add the optional fixed-width black margin used by exported captures. */
 QImage addCaptureBorder(const QImage &frame) {
@@ -180,6 +187,10 @@ struct DeviceSettings {
     bool borderDotted = false;
     /** Whether 288 source lines are stretched over all 480 VGA lines. */
     bool stretch = false;
+    /** Density of firmware/viewer foreground phosphor grain. */
+    int noiseLevel = P2000M_PHOSPHOR_NOISE_OFF;
+    /** Whether the connected firmware reports the v0.4 noise setting. */
+    bool noiseSupported = false;
     /** Manual capture phase adjustment in 63 MHz sampling ticks. */
     int phaseTrim = 0;
     /** Firmware-reported persistence state. */
@@ -202,7 +213,7 @@ QString colorText(quint32 rgb) {
 bool parseDeviceSettings(const QByteArray &consoleText,
                          DeviceSettings *settings) {
     static const QRegularExpression expression(QStringLiteral(
-        R"(DISPLAY foreground=#([0-9a-fA-F]{6}) background=#([0-9a-fA-F]{6}) border=(on|off) border_color=#([0-9a-fA-F]{6}) border_style=(solid|dotted) scale=(fit-5:3|native-1:1) phase_trim=(-?[0-9]+) storage=([a-zA-Z]+))"));
+        R"(DISPLAY foreground=#([0-9a-fA-F]{6}) background=#([0-9a-fA-F]{6}) border=(on|off) border_color=#([0-9a-fA-F]{6}) border_style=(solid|dotted) scale=(fit-5:3|native-1:1)(?: noise=(off|low|medium|high))? phase_trim=(-?[0-9]+) storage=([a-zA-Z]+))"));
     const QRegularExpressionMatch match = expression.match(
         QString::fromLatin1(consoleText));
     if (!match.hasMatch()) {
@@ -216,7 +227,7 @@ bool parseDeviceSettings(const QByteArray &consoleText,
     const quint32 foreground = match.captured(1).toUInt(&foregroundOk, 16);
     const quint32 background = match.captured(2).toUInt(&backgroundOk, 16);
     const quint32 border = match.captured(4).toUInt(&borderOk, 16);
-    const int phase = match.captured(7).toInt(&phaseOk);
+    const int phase = match.captured(8).toInt(&phaseOk);
     if (!foregroundOk || !backgroundOk || !borderOk || !phaseOk ||
         phase < -4 || phase > 4) {
         return false;
@@ -228,8 +239,19 @@ bool parseDeviceSettings(const QByteArray &consoleText,
     settings->border = border;
     settings->borderDotted = match.captured(5) == QStringLiteral("dotted");
     settings->stretch = match.captured(6) == QStringLiteral("fit-5:3");
+    const QString noise = match.captured(7);
+    settings->noiseSupported = !noise.isEmpty();
+    if (noise == QStringLiteral("low")) {
+        settings->noiseLevel = P2000M_PHOSPHOR_NOISE_LOW;
+    } else if (noise == QStringLiteral("medium")) {
+        settings->noiseLevel = P2000M_PHOSPHOR_NOISE_MEDIUM;
+    } else if (noise == QStringLiteral("high")) {
+        settings->noiseLevel = P2000M_PHOSPHOR_NOISE_HIGH;
+    } else {
+        settings->noiseLevel = P2000M_PHOSPHOR_NOISE_OFF;
+    }
     settings->phaseTrim = phase;
-    settings->storage = match.captured(8);
+    settings->storage = match.captured(9);
     return true;
 }
 
@@ -516,7 +538,7 @@ public:
     /** Populate controls from the adapter's current settings. */
     ConfigurationDialog(const DeviceSettings &settings,
                         QWidget *parent = nullptr)
-        : QDialog(parent) {
+        : QDialog(parent), noiseSupported_(settings.noiseSupported) {
         setWindowTitle(QStringLiteral("Configure P2000M Adapter"));
         setMinimumWidth(430);
 
@@ -530,6 +552,29 @@ public:
 
         auto *form = new QFormLayout;
         foreground_ = new ColorButton(settings.foreground, this);
+        foregroundPreset_ = new QComboBox(this);
+        foregroundPreset_->addItem(QStringLiteral("Custom color"), 0u);
+        foregroundPreset_->addItem(
+            QStringLiteral("Matrix green (%1)").arg(colorText(kMatrixGreen)),
+            kMatrixGreen);
+        foregroundPreset_->addItem(
+            QStringLiteral("Retro amber (%1)").arg(colorText(kRetroAmber)),
+            kRetroAmber);
+        foregroundPreset_->addItem(
+            QStringLiteral("Warm off-white (%1)")
+                .arg(colorText(kWarmOffWhite)),
+            kWarmOffWhite);
+        syncForegroundPreset();
+        connect(foregroundPreset_, &QComboBox::currentIndexChanged,
+                this, [this](int index) {
+                    if (index > 0) {
+                        foreground_->setColor(
+                            foregroundPreset_->currentData().toUInt());
+                    }
+                });
+        // ColorButton's own click handler runs first and opens the picker.
+        connect(foreground_, &QPushButton::clicked,
+                this, [this] { syncForegroundPreset(); });
         background_ = new ColorButton(settings.background, this);
         borderColor_ = new ColorButton(settings.border, this);
         borderEnabled_ = new QCheckBox(QStringLiteral("Show border"), this);
@@ -542,18 +587,38 @@ public:
         scaling_->addItem(QStringLiteral("Native 1:1 (centered)"), false);
         scaling_->addItem(QStringLiteral("Fit 5:3 (full height)"), true);
         scaling_->setCurrentIndex(settings.stretch ? 1 : 0);
+        noise_ = new QComboBox(this);
+        noise_->addItem(QStringLiteral("Off"),
+                        P2000M_PHOSPHOR_NOISE_OFF);
+        noise_->addItem(QStringLiteral("Low (subtle)"),
+                        P2000M_PHOSPHOR_NOISE_LOW);
+        noise_->addItem(QStringLiteral("Medium"),
+                        P2000M_PHOSPHOR_NOISE_MEDIUM);
+        noise_->addItem(QStringLiteral("High"),
+                        P2000M_PHOSPHOR_NOISE_HIGH);
+        noise_->setCurrentIndex(settings.noiseLevel);
+        noise_->setEnabled(noiseSupported_);
+        noise_->setToolTip(noiseSupported_
+                               ? QStringLiteral(
+                                     "Randomly dims foreground pixels by one "
+                                     "RGB444 DAC step")
+                               : QStringLiteral(
+                                     "Requires adapter firmware v0.4.0 or newer"));
         phaseTrim_ = new QSpinBox(this);
         phaseTrim_->setRange(-4, 4);
         phaseTrim_->setValue(settings.phaseTrim);
         phaseTrim_->setSuffix(QStringLiteral(" tick(s)"));
         auto *storage = new QLabel(settings.storage, this);
 
-        form->addRow(QStringLiteral("Foreground:"), foreground_);
+        form->addRow(QStringLiteral("Foreground preset:"),
+                     foregroundPreset_);
+        form->addRow(QStringLiteral("Foreground color:"), foreground_);
         form->addRow(QStringLiteral("Background:"), background_);
         form->addRow(QStringLiteral("Border:"), borderEnabled_);
         form->addRow(QStringLiteral("Border color:"), borderColor_);
         form->addRow(QStringLiteral("Border style:"), borderStyle_);
         form->addRow(QStringLiteral("Vertical scaling:"), scaling_);
+        form->addRow(QStringLiteral("Phosphor grain:"), noise_);
         form->addRow(QStringLiteral("Sampling phase:"), phaseTrim_);
         form->addRow(QStringLiteral("Current storage state:"), storage);
         layout->addLayout(form);
@@ -589,6 +654,8 @@ public:
         result.borderEnabled = borderEnabled_->isChecked();
         result.borderDotted = borderStyle_->currentData().toBool();
         result.stretch = scaling_->currentData().toBool();
+        result.noiseLevel = noise_->currentData().toInt();
+        result.noiseSupported = noiseSupported_;
         result.phaseTrim = phaseTrim_->value();
         return result;
     }
@@ -597,16 +664,33 @@ private:
     /** Restore every editable control from one settings snapshot. */
     void loadSettings(const DeviceSettings &settings) {
         foreground_->setColor(settings.foreground);
+        syncForegroundPreset();
         background_->setColor(settings.background);
         borderColor_->setColor(settings.border);
         borderEnabled_->setChecked(settings.borderEnabled);
         borderStyle_->setCurrentIndex(settings.borderDotted ? 1 : 0);
         scaling_->setCurrentIndex(settings.stretch ? 1 : 0);
+        noise_->setCurrentIndex(settings.noiseLevel);
         phaseTrim_->setValue(settings.phaseTrim);
+    }
+
+    /** Select the named preset matching the color button, or Custom color. */
+    void syncForegroundPreset() {
+        const quint32 foreground = foreground_->color();
+        int matchingIndex = 0;
+        for (int index = 1; index < foregroundPreset_->count(); ++index) {
+            if (foregroundPreset_->itemData(index).toUInt() == foreground) {
+                matchingIndex = index;
+                break;
+            }
+        }
+        foregroundPreset_->setCurrentIndex(matchingIndex);
     }
 
     /** Foreground color selector. */
     ColorButton *foreground_ = nullptr;
+    /** Named foreground-color shortcuts, plus the custom-color fallback. */
+    QComboBox *foregroundPreset_ = nullptr;
     /** Background color selector. */
     ColorButton *background_ = nullptr;
     /** Border color selector. */
@@ -617,8 +701,12 @@ private:
     QComboBox *borderStyle_ = nullptr;
     /** Native/fit vertical scaling selector. */
     QComboBox *scaling_ = nullptr;
+    /** Foreground phosphor-grain density selector. */
+    QComboBox *noise_ = nullptr;
     /** Manual capture phase adjustment. */
     QSpinBox *phaseTrim_ = nullptr;
+    /** Whether the connected firmware accepts the noise command. */
+    bool noiseSupported_ = false;
 };
 
 /** Paints the reconstructed VGA frame and records actual presentation cost. */
@@ -1625,6 +1713,19 @@ private:
                                            : "border-style solid\r\n";
         commands += requested.stretch ? "scale fit\r\n"
                                       : "scale native\r\n";
+        if (current.noiseSupported) {
+            static const char *const noiseCommands[] = {
+                "noise off\r\n",
+                "noise low\r\n",
+                "noise medium\r\n",
+                "noise high\r\n",
+            };
+            const int level = std::clamp(
+                requested.noiseLevel,
+                static_cast<int>(P2000M_PHOSPHOR_NOISE_OFF),
+                static_cast<int>(P2000M_PHOSPHOR_NOISE_HIGH));
+            commands += noiseCommands[level];
+        }
 
         int phase = current.phaseTrim;
         while (phase < requested.phaseTrim) {
@@ -1988,7 +2089,7 @@ private:
             QElapsedTimer renderTimer;
             renderTimer.start();
             QImage rendered = renderFrame(payload, foreground, background,
-                                          border, style);
+                                          border, style, sequence);
             const quint32 sourceFrameStep = lastSequenceValid_
                                                 ? std::max(
                                                       sequence - lastSequence_,
@@ -2215,13 +2316,24 @@ private:
     /** Reconstruct the exact 640 x 480 VGA view from a packed source frame. */
     QImage renderFrame(const QByteArray &payload, quint32 foreground,
                        quint32 background, quint32 border,
-                       quint32 style) const {
+                       quint32 style, quint32 sequence) const {
         const QRgb foregroundRgb = 0xff000000u | (foreground & 0x00ffffffu);
         const QRgb backgroundRgb = 0xff000000u | (background & 0x00ffffffu);
         const QRgb borderRgb = 0xff000000u | (border & 0x00ffffffu);
         const bool borderEnabled = (style & 0x1u) != 0u;
         const bool borderDotted = (style & 0x2u) != 0u;
         const bool stretch = (style & 0x4u) != 0u;
+        const uint8_t noiseLevel = (style >> 3u) & 0x3u;
+        const uint16_t foregroundRgb444 =
+            static_cast<uint16_t>((foreground >> 20u) & 0x0fu) |
+            static_cast<uint16_t>(((foreground >> 12u) & 0x0fu) << 4u) |
+            static_cast<uint16_t>(((foreground >> 4u) & 0x0fu) << 8u);
+        const uint16_t dimmedRgb444 =
+            p2000m_phosphor_noise_dim_rgb444(foregroundRgb444);
+        const QRgb dimmedForegroundRgb = qRgb(
+            (dimmedRgb444 & 0x0fu) * 17u,
+            ((dimmedRgb444 >> 4u) & 0x0fu) * 17u,
+            ((dimmedRgb444 >> 8u) & 0x0fu) * 17u);
 
         QImage image(kSourceWidth, kVgaHeight, QImage::Format_RGB32);
         image.fill(backgroundRgb);
@@ -2257,6 +2369,8 @@ private:
 
             QRgb *destination =
                 reinterpret_cast<QRgb *>(image.scanLine(vgaY));
+            uint32_t noiseState = p2000m_phosphor_noise_seed(
+                sequence, static_cast<unsigned>(visibleY));
             for (int wordIndex = 0; wordIndex < kSourceWidth / 32;
                  ++wordIndex) {
                 const int offset = sourceY * (kSourceWidth / 8) +
@@ -2277,6 +2391,17 @@ private:
                             8u * sizeof(QRgb));
                 std::memcpy(pixels + 24, pixelLookup[word & 0xffu].data(),
                             8u * sizeof(QRgb));
+
+                if (noiseLevel != P2000M_PHOSPHOR_NOISE_OFF &&
+                    dimmedRgb444 != foregroundRgb444) {
+                    const quint32 selected = word &
+                        p2000m_phosphor_noise_mask(noiseLevel, &noiseState);
+                    for (unsigned bit = 0u; bit < 32u; ++bit) {
+                        if ((selected & (0x80000000u >> bit)) != 0u) {
+                            pixels[bit] = dimmedForegroundRgb;
+                        }
+                    }
+                }
             }
 
             if (!borderEnabled) {
