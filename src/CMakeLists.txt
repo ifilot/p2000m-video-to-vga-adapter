@@ -8,6 +8,7 @@ add_executable(${FIRMWARE_TARGET}
     pal_output.c
     pal_waveform.c
     p2000m_capture.c
+    p2000m_signal_loss.c
 )
 
 target_include_directories(${FIRMWARE_TARGET} PRIVATE
@@ -51,7 +52,9 @@ target_compile_definitions(${FIRMWARE_TARGET} PRIVATE
     PICO_SCANVIDEO_DPI_PIXEL_BCOUNT=4
 
     PICO_SCANVIDEO_MAX_SCANLINE_BUFFER_WORDS=323
-    PICO_SCANVIDEO_SCANLINE_BUFFER_COUNT=4
+    # Eight lines provide enough producer headroom for a PAL DMA-buffer refill
+    # without exposing scanvideo's blue missing-scanline sentinel.
+    PICO_SCANVIDEO_SCANLINE_BUFFER_COUNT=8
     PICO_SCANVIDEO_RP2350_OVERLAY_SDK_SPINLOCKS=1
 
     # The application initializes TinyUSB, while pico_stdio_usb's low-priority
@@ -67,6 +70,7 @@ set_source_files_properties(
     pal_output.c
     pal_waveform.c
     p2000m_capture.c
+    p2000m_signal_loss.c
     firmware.c
     PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Wpedantic"
 )

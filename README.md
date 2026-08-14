@@ -119,8 +119,8 @@ firmware, switches the adapter into binary screen mode, and displays complete
 CRC-checked frames. It
 returns the adapter to console mode when Disconnect is selected or the window
 is closed. Its Adapter menu can configure colors, borders, scaling, phosphor
-grain, sampling phase, and optional persistent storage through the firmware's
-console.
+grain, sampling phase, independent VGA/PAL output enables, and optional
+persistent storage through the firmware's console.
 The viewer uses a monitor-derived application icon, places rolling live
 performance graphs beside the screen, and keeps the status bar focused on the
 COM port and source frame number. It can save lossless screenshots and can
@@ -263,7 +263,8 @@ to a defined level before synchronization.
 
 ### Monochrome 625/50 presentation
 
-PIO1 emits composite samples at exactly 14 MHz (`252 MHz / 18`). Each 64 us
+The dedicated PIO2 block emits composite samples at exactly 14 MHz
+(`252 MHz / 18`). Each 64 us
 line contains 896 two-bit samples. Two chained DMA channels alternate between
 two pairs of 224-byte scanline buffers, while core 1 prepares each completed pair
 alongside VGA scanline generation. The implementation therefore does not store
@@ -274,12 +275,15 @@ exactly half a line after line 312, and both fields use the full equalising,
 broad-sync, and post-equalising pulse sequence. PAL lines 23-310 and 336-623
 each carry all 288 source rows. A new immutable decoded frame is selected only
 at a field boundary; absent source frames are repeated, and signal loss produces
-black composite video while synchronization continues.
+a centered monochrome `SIGNAL LOST` card while synchronization continues. The
+card is generated directly into the PAL scanlines, so it requires no additional
+full-frame buffer and disappears as soon as stable source timing returns.
 
 The 640 source pixels are emitted one-to-one and centred in the 728-sample
 picture interval. VGA-only colour, border, scaling, and phosphor-grain settings
 do not alter the monochrome composite pixels. A settings save briefly pauses
-and restarts composite output around the flash operation.
+an enabled composite output around the flash operation and preserves an output
+that was already disabled.
 
 ## USB controls
 
@@ -301,6 +305,11 @@ unsolicited statistics.
   compatibility. Omitting the encoding selects raw records.
 - `settings`: print all active settings and whether they are factory defaults,
   modified in RAM, or saved in flash.
+- `vga on`, `vga off`, or `vga toggle`: control VGA timing independently of
+  capture, PAL output, and USB screen streaming.
+- `pal on`, `pal off`, or `pal toggle`: control composite DMA/PIO output
+  independently of capture, VGA, and USB screen streaming. `composite` is
+  accepted as an alias for `pal`.
 - `border on`, `border off`, or `border toggle`: control a one-pixel rectangle
   around the 640 x 288 source image.
 - `border-color <color>`: set the border color independently of the foreground
@@ -317,10 +326,10 @@ unsolicited statistics.
 - `defaults`: restore white on black, a disabled solid magenta (`#FF00FF`)
   border, native 1:1 scaling, and disabled phosphor grain.
 - `save`: explicitly save the current colors, border state, border pattern,
-  scaling mode, phosphor-grain level, and manual phase trim. These settings are
-  restored after reset or power cycling.
+  scaling mode, phosphor-grain level, manual phase trim, and VGA/PAL enable
+  states. These settings are restored after reset or power cycling.
 - `factory-reset`: erase the saved configuration and immediately restore the
-  factory display style and zero manual phase trim.
+  factory display style, zero manual phase trim, and both physical outputs.
 - `tune` or `j`: run automatic phase tuning and print all candidate scores.
 - `phase +`, `phase -`, or `phase auto`: adjust or clear the manual phase trim.
 - `geometry` or `g`: print coverage totals for all 80 x 24 character cells.

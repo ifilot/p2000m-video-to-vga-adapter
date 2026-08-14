@@ -27,7 +27,8 @@ typedef struct {
  *
  * The callback is made on core 1 after the preceding field's final active line
  * has completed. It may retain the preceding pointer when no newer frame is
- * available. A null result produces a black field.
+ * available. A null result produces a monochrome signal-loss card while PAL
+ * synchronization continues.
  */
 typedef const uint32_t *(*pal_output_frame_provider_t)(unsigned field,
                                                        uint32_t *sequence);

@@ -193,6 +193,12 @@ struct DeviceSettings {
     bool noiseSupported = false;
     /** Manual capture phase adjustment in 63 MHz sampling ticks. */
     int phaseTrim = 0;
+    /** Whether the physical VGA timing output is enabled. */
+    bool vgaEnabled = true;
+    /** Whether the PAL-compatible composite output is enabled. */
+    bool palEnabled = true;
+    /** Whether the connected firmware exposes independent output controls. */
+    bool outputControlSupported = false;
     /** Firmware-reported persistence state. */
     QString storage = QStringLiteral("default");
 };
@@ -213,7 +219,7 @@ QString colorText(quint32 rgb) {
 bool parseDeviceSettings(const QByteArray &consoleText,
                          DeviceSettings *settings) {
     static const QRegularExpression expression(QStringLiteral(
-        R"(DISPLAY foreground=#([0-9a-fA-F]{6}) background=#([0-9a-fA-F]{6}) border=(on|off) border_color=#([0-9a-fA-F]{6}) border_style=(solid|dotted) scale=(fit-5:3|native-1:1)(?: noise=(off|low|medium|high))? phase_trim=(-?[0-9]+) storage=([a-zA-Z]+))"));
+        R"(DISPLAY foreground=#([0-9a-fA-F]{6}) background=#([0-9a-fA-F]{6}) border=(on|off) border_color=#([0-9a-fA-F]{6}) border_style=(solid|dotted) scale=(fit-5:3|native-1:1)(?: noise=(off|low|medium|high))? phase_trim=(-?[0-9]+) storage=([a-zA-Z]+)(?: vga=(on|off) pal=(on|off))?)"));
     const QRegularExpressionMatch match = expression.match(
         QString::fromLatin1(consoleText));
     if (!match.hasMatch()) {
@@ -252,6 +258,9 @@ bool parseDeviceSettings(const QByteArray &consoleText,
     }
     settings->phaseTrim = phase;
     settings->storage = match.captured(9);
+    settings->outputControlSupported = !match.captured(10).isEmpty();
+    settings->vgaEnabled = match.captured(10) != QStringLiteral("off");
+    settings->palEnabled = match.captured(11) != QStringLiteral("off");
     return true;
 }
 
@@ -538,14 +547,17 @@ public:
     /** Populate controls from the adapter's current settings. */
     ConfigurationDialog(const DeviceSettings &settings,
                         QWidget *parent = nullptr)
-        : QDialog(parent), noiseSupported_(settings.noiseSupported) {
+        : QDialog(parent),
+          noiseSupported_(settings.noiseSupported),
+          outputControlSupported_(settings.outputControlSupported) {
         setWindowTitle(QStringLiteral("Configure P2000M Adapter"));
         setMinimumWidth(430);
 
         auto *layout = new QVBoxLayout(this);
         auto *explanation = new QLabel(
-            QStringLiteral("Changes are applied to both the VGA output and "
-                           "this viewer. Save to make them persistent."),
+            QStringLiteral("Changes are applied to the physical video "
+                           "outputs and this viewer. Save to make them "
+                           "persistent."),
             this);
         explanation->setWordWrap(true);
         layout->addWidget(explanation);
@@ -608,6 +620,19 @@ public:
         phaseTrim_->setRange(-4, 4);
         phaseTrim_->setValue(settings.phaseTrim);
         phaseTrim_->setSuffix(QStringLiteral(" tick(s)"));
+        vgaEnabled_ = new QCheckBox(QStringLiteral("Enable VGA output"), this);
+        vgaEnabled_->setChecked(settings.vgaEnabled);
+        palEnabled_ = new QCheckBox(
+            QStringLiteral("Enable PAL composite output"), this);
+        palEnabled_->setChecked(settings.palEnabled);
+        vgaEnabled_->setEnabled(outputControlSupported_);
+        palEnabled_->setEnabled(outputControlSupported_);
+        if (!outputControlSupported_) {
+            const QString tooltip = QStringLiteral(
+                "Requires adapter firmware with independent output control");
+            vgaEnabled_->setToolTip(tooltip);
+            palEnabled_->setToolTip(tooltip);
+        }
         auto *storage = new QLabel(settings.storage, this);
 
         form->addRow(QStringLiteral("Foreground preset:"),
@@ -620,6 +645,8 @@ public:
         form->addRow(QStringLiteral("Vertical scaling:"), scaling_);
         form->addRow(QStringLiteral("Phosphor grain:"), noise_);
         form->addRow(QStringLiteral("Sampling phase:"), phaseTrim_);
+        form->addRow(QStringLiteral("VGA connector:"), vgaEnabled_);
+        form->addRow(QStringLiteral("Composite connector:"), palEnabled_);
         form->addRow(QStringLiteral("Current storage state:"), storage);
         layout->addLayout(form);
 
@@ -657,6 +684,9 @@ public:
         result.noiseLevel = noise_->currentData().toInt();
         result.noiseSupported = noiseSupported_;
         result.phaseTrim = phaseTrim_->value();
+        result.vgaEnabled = vgaEnabled_->isChecked();
+        result.palEnabled = palEnabled_->isChecked();
+        result.outputControlSupported = outputControlSupported_;
         return result;
     }
 
@@ -672,6 +702,8 @@ private:
         scaling_->setCurrentIndex(settings.stretch ? 1 : 0);
         noise_->setCurrentIndex(settings.noiseLevel);
         phaseTrim_->setValue(settings.phaseTrim);
+        vgaEnabled_->setChecked(settings.vgaEnabled);
+        palEnabled_->setChecked(settings.palEnabled);
     }
 
     /** Select the named preset matching the color button, or Custom color. */
@@ -705,8 +737,14 @@ private:
     QComboBox *noise_ = nullptr;
     /** Manual capture phase adjustment. */
     QSpinBox *phaseTrim_ = nullptr;
+    /** Physical VGA timing-output enable control. */
+    QCheckBox *vgaEnabled_ = nullptr;
+    /** Physical PAL composite-output enable control. */
+    QCheckBox *palEnabled_ = nullptr;
     /** Whether the connected firmware accepts the noise command. */
     bool noiseSupported_ = false;
+    /** Whether the connected firmware accepts VGA/PAL output commands. */
+    bool outputControlSupported_ = false;
 };
 
 /** Paints the reconstructed VGA frame and records actual presentation cost. */
@@ -1735,6 +1773,12 @@ private:
         while (phase > requested.phaseTrim) {
             commands += "phase -\r\n";
             --phase;
+        }
+        if (current.outputControlSupported) {
+            commands += requested.vgaEnabled ? "vga on\r\n"
+                                             : "vga off\r\n";
+            commands += requested.palEnabled ? "pal on\r\n"
+                                             : "pal off\r\n";
         }
         if (save) {
             commands += "save\r\n";

@@ -30,7 +30,10 @@ enum {
         PAL_LINES_PER_DMA_BUFFER * PAL_WORDS_PER_LINE,
 };
 
-static PIO pal_pio = pio1;
+_Static_assert(NUM_PIOS > 2, "PAL output requires the RP2350's third PIO");
+
+/** PIO block dedicated to composite; VGA uses PIO0 and capture fills PIO1. */
+static PIO pal_pio = pio2;
 static int pal_sm = -1;
 static int pal_program_offset = -1;
 static int pal_dma[2] = {-1, -1};
@@ -115,7 +118,9 @@ void pal_output_initialize(pal_output_frame_provider_t frame_provider) {
     hard_assert(clock_get_hz(clk_sys) == 252000000u);
     provide_frame = frame_provider;
 
+    hard_assert(pio_can_add_program(pal_pio, &composite_program));
     pal_program_offset = pio_add_program(pal_pio, &composite_program);
+    hard_assert(pal_program_offset >= 0);
     pal_sm = (int)pio_claim_unused_sm(pal_pio, true);
     gpio_set_drive_strength(PAL_PIN_BASE, GPIO_DRIVE_STRENGTH_12MA);
     gpio_set_drive_strength(PAL_PIN_LEVEL, GPIO_DRIVE_STRENGTH_12MA);
@@ -152,7 +157,7 @@ void pal_output_start(void) {
     }
 }
 
-void pal_output_service(void) {
+void __not_in_flash_func(pal_output_service)(void) {
     if (!running || dma_channel_is_busy((uint)pal_dma[active_dma])) {
         return;
     }

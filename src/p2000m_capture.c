@@ -88,7 +88,7 @@ _Static_assert(REQUIRED_SYSTEM_CLOCK_HZ / CAPTURE_CLOCK_DIVIDER ==
                    P2000M_CAPTURE_SAMPLE_CLOCK_HZ,
                "Capture PIO must retain the exact 63 MHz clock");
 
-/** PIO block reserved for input capture; scanvideo uses PIO0. */
+/** PIO block whose instruction memory is fully occupied by input capture. */
 static PIO capture_pio = pio1;
 /** Claimed state-machine number within capture_pio. */
 static unsigned capture_sm;

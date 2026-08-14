@@ -23,6 +23,7 @@
 #include "p2000m_capture.h"
 #include "p2000m_packbits.h"
 #include "p2000m_phosphor_noise.h"
+#include "p2000m_signal_loss.h"
 #include "pico/flash.h"
 #include "pico/multicore.h"
 #include "pico/scanvideo.h"
@@ -33,15 +34,9 @@
 
 /** Semantic firmware version supplied by the top-level CMake project. */
 static const char firmware_version[] = "v" P2000M_VID2VGA_VERSION;
-/** Product label shown on the VGA signal-loss status card. */
-static const char signal_lost_product[] = "P2000M VID2VGA";
-/** Primary message shown when source synchronization has timed out. */
-static const char signal_lost_message[] = "SIGNAL LOST";
 /** Compile-time firmware identification shown without requiring USB. */
 static const char signal_lost_firmware[] =
     "FIRMWARE v" P2000M_VID2VGA_VERSION;
-/** Synchronization inputs for which the capture engine is waiting. */
-static const char signal_lost_waiting[] = "WAITING FOR HSYNC + VSYNC";
 
 enum {
     /** Experimental 2x clock preserving exact capture and VGA divisors. */
@@ -91,21 +86,15 @@ enum {
     /** File-format signature: ASCII "V2GA" when viewed little-endian. */
     SETTINGS_MAGIC = 0x41473256,
     /** On-flash settings structure version. */
-    SETTINGS_VERSION = 3,
+    SETTINGS_VERSION = 4,
     /** Maximum time to coordinate each multicore flash lockout phase. */
     FLASH_LOCKOUT_TIMEOUT_MS = 1000,
     /** Core-start handshake value sent through the multicore FIFO. */
     VGA_READY_MAGIC = 0x56474131,
-    /** Width of each letter in the built-in signal-loss font. */
-    SIGNAL_LOST_GLYPH_WIDTH = 5,
-    /** Height of each letter in the built-in signal-loss font. */
-    SIGNAL_LOST_GLYPH_HEIGHT = 7,
     /** Integer enlargement applied to the signal-loss message. */
     SIGNAL_LOST_FONT_SCALE = 4,
     /** Integer enlargement applied to signal-loss status details. */
     SIGNAL_LOST_INFO_SCALE = 2,
-    /** Uppercase letters and digits stored in the status-card font. */
-    SIGNAL_LOST_FONT_GLYPHS = 36,
     /** Left edge of the centered signal-loss panel. */
     SIGNAL_LOST_PANEL_LEFT = 90,
     /** Right edge, exclusive, of the centered signal-loss panel. */
@@ -192,6 +181,10 @@ enum {
     DISPLAY_FLAG_BORDER_DOTTED = 1u << 1,
     /** Persisted full-height vertical-scaling selection bit. */
     DISPLAY_FLAG_VERTICAL_STRETCH = 1u << 2,
+    /** Persisted physical VGA output enable bit. */
+    OUTPUT_FLAG_VGA_ENABLED = 1u << 0,
+    /** Persisted physical PAL composite output enable bit. */
+    OUTPUT_FLAG_PAL_ENABLED = 1u << 1,
 };
 
 /** User-selectable colors and geometry overlay for one VGA frame. */
@@ -212,7 +205,7 @@ typedef struct {
     uint8_t phosphor_noise_level;
 } display_style_t;
 
-/** Versioned, checksummed display settings stored redundantly in flash. */
+/** Versioned, checksummed display/output settings stored redundantly in flash. */
 typedef struct {
     /** SETTINGS_MAGIC identifies records owned by this firmware. */
     uint32_t magic;
@@ -234,8 +227,8 @@ typedef struct {
     uint8_t phosphor_noise_level;
     /** Saved manual sampling-phase trim from -4 through +4 ticks. */
     int8_t manual_phase_ticks;
-    /** Reserved for a future compatible settings addition. */
-    uint8_t reserved;
+    /** Packed OUTPUT_FLAG_* values. */
+    uint8_t output_flags;
     /** CRC-32 of every preceding byte in this structure. */
     uint32_t checksum;
 } persisted_settings_t;
@@ -244,6 +237,27 @@ _Static_assert(sizeof(persisted_settings_t) == 32u,
                "Persisted settings format must remain exactly 32 bytes");
 _Static_assert(offsetof(persisted_settings_t, checksum) == 28u,
                "Persisted settings checksum must remain at byte 28");
+
+/** Version-three record retained solely to migrate existing saved settings. */
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t length;
+    uint32_t sequence;
+    uint32_t foreground_rgb;
+    uint32_t background_rgb;
+    uint32_t border_rgb;
+    uint8_t display_flags;
+    uint8_t phosphor_noise_level;
+    int8_t manual_phase_ticks;
+    uint8_t reserved;
+    uint32_t checksum;
+} persisted_settings_v3_t;
+
+_Static_assert(sizeof(persisted_settings_v3_t) == 32u,
+               "Version-three settings format must remain exactly 32 bytes");
+_Static_assert(offsetof(persisted_settings_v3_t, checksum) == 28u,
+               "Version-three settings checksum must remain at byte 28");
 
 /** Version-two record retained solely to migrate existing saved settings. */
 typedef struct {
@@ -357,13 +371,19 @@ static bool displayed_signal_present;
 static int pal_displayed_buffer = -1;
 /** Source capture sequence currently presented on PAL. */
 static uint32_t pal_displayed_sequence;
-/** Requested PAL pause state, written by core 0 before flash mutation. */
+/** Requested VGA producer pause; true also means the physical output is off. */
+static volatile bool vga_pause_requested;
+/** VGA producer pause state acknowledged by core 1. */
+static volatile bool vga_pause_applied;
+/** Requested PAL pause; true also means the physical output is off. */
 static volatile bool pal_pause_requested;
 /** PAL pause state acknowledged by the core-1 output loop. */
 static volatile bool pal_pause_applied;
 
 /** Lifetime VGA frame counter, written by core 1. */
 static volatile uint32_t generated_vga_frames;
+/** Discontinuities proving scanvideo advanced before a line was generated. */
+static volatile uint32_t vga_scanline_gaps;
 /** Number of VGA frame boundaries that selected a new decoded source frame. */
 static volatile uint32_t source_frame_swaps;
 /** Number of VGA frames that deliberately repeated the preceding source. */
@@ -548,8 +568,30 @@ static bool settings_record_is_valid(const persisted_settings_t *record) {
             P2000M_PHOSPHOR_NOISE_LEVEL_COUNT &&
         record->manual_phase_ticks >= -4 &&
         record->manual_phase_ticks <= 4 &&
+        (record->output_flags & ~(OUTPUT_FLAG_VGA_ENABLED |
+                                  OUTPUT_FLAG_PAL_ENABLED)) == 0u &&
         record->checksum ==
             settings_crc32(record, offsetof(persisted_settings_t, checksum));
+}
+
+/** Validate a version-three flash record for settings migration. */
+static bool settings_v3_record_is_valid(
+    const persisted_settings_v3_t *record) {
+    return record->magic == SETTINGS_MAGIC &&
+        record->version == 3u &&
+        record->length == sizeof(*record) &&
+        (record->foreground_rgb & 0xff000000u) == 0u &&
+        (record->background_rgb & 0xff000000u) == 0u &&
+        (record->border_rgb & 0xff000000u) == 0u &&
+        (record->display_flags & ~(DISPLAY_FLAG_BORDER_ENABLED |
+                                   DISPLAY_FLAG_BORDER_DOTTED |
+                                   DISPLAY_FLAG_VERTICAL_STRETCH)) == 0u &&
+        record->phosphor_noise_level <
+            P2000M_PHOSPHOR_NOISE_LEVEL_COUNT &&
+        record->manual_phase_ticks >= -4 &&
+        record->manual_phase_ticks <= 4 &&
+        record->checksum == settings_crc32(
+            record, offsetof(persisted_settings_v3_t, checksum));
 }
 
 /** Validate a version-two flash record for settings migration. */
@@ -609,14 +651,20 @@ static bool settings_sequence_is_newer(uint32_t a, uint32_t b) {
  * and flash bookkeeping are restored into their corresponding module globals.
  *
  * @param style Destination display style, unchanged without a valid record.
+ * @param vga_enabled Destination VGA state, unchanged for legacy/no records.
+ * @param pal_enabled Destination PAL state, unchanged for legacy/no records.
  * @return true when settings were restored; false when defaults should remain.
  */
-static bool load_saved_configuration(display_style_t *style) {
+static bool load_saved_configuration(display_style_t *style,
+                                     bool *vga_enabled,
+                                     bool *pal_enabled) {
     int newest_slot = -1;
     const persisted_settings_t *newest_record = NULL;
     for (unsigned slot = 0; slot < SETTINGS_SLOT_COUNT; ++slot) {
         const persisted_settings_t *candidate = settings_slot_record(slot);
         const bool valid = settings_record_is_valid(candidate) ||
+            settings_v3_record_is_valid(
+                (const persisted_settings_v3_t *)candidate) ||
             settings_v2_record_is_valid(
                 (const persisted_settings_v2_t *)candidate) ||
             settings_v1_record_is_valid(
@@ -635,7 +683,8 @@ static bool load_saved_configuration(display_style_t *style) {
 
     style->foreground_rgb = newest_record->foreground_rgb;
     style->background_rgb = newest_record->background_rgb;
-    if (newest_record->version == SETTINGS_VERSION) {
+    if (newest_record->version == SETTINGS_VERSION ||
+        newest_record->version == 3u) {
         style->border_rgb = newest_record->border_rgb;
         style->border_enabled =
             (newest_record->display_flags & DISPLAY_FLAG_BORDER_ENABLED) != 0u;
@@ -646,6 +695,12 @@ static bool load_saved_configuration(display_style_t *style) {
              DISPLAY_FLAG_VERTICAL_STRETCH) != 0u;
         style->phosphor_noise_level = newest_record->phosphor_noise_level;
         saved_manual_phase_ticks = newest_record->manual_phase_ticks;
+        if (newest_record->version == SETTINGS_VERSION) {
+            *vga_enabled =
+                (newest_record->output_flags & OUTPUT_FLAG_VGA_ENABLED) != 0u;
+            *pal_enabled =
+                (newest_record->output_flags & OUTPUT_FLAG_PAL_ENABLED) != 0u;
+        }
     } else if (newest_record->version == 2u) {
         const persisted_settings_v2_t *legacy =
             (const persisted_settings_v2_t *)newest_record;
@@ -731,6 +786,21 @@ static void initialize_display_styles(const display_style_t *initial_style) {
  * @return Nothing.
  */
 static void publish_display_style(const display_style_t *style) {
+    if (__atomic_load_n(&vga_pause_applied, __ATOMIC_ACQUIRE)) {
+        // Core 1 cannot adopt a pending style at a frame boundary while VGA
+        // is stopped. Its pause acknowledgement makes both lookup buffers
+        // safe to replace directly, ready for the next enable operation.
+        for (unsigned i = 0u; i < DISPLAY_STYLE_COUNT; ++i) {
+            display_styles[i] = *style;
+            build_monochrome_lookup(i);
+        }
+        displayed_style_index = 0u;
+        __atomic_store_n(&requested_style_index, 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&applied_style_index, 0u, __ATOMIC_RELEASE);
+        configuration_dirty = true;
+        return;
+    }
+
     while (__atomic_load_n(&requested_style_index, __ATOMIC_ACQUIRE) !=
            __atomic_load_n(&applied_style_index, __ATOMIC_ACQUIRE)) {
         tight_loop_contents();
@@ -1006,6 +1076,26 @@ static const uint32_t *select_frame_for_next_pal_field(unsigned field,
     return frame;
 }
 
+/** Release the decoded framebuffer retained by the stopped VGA output. */
+static void release_vga_frame(void) {
+    const uint32_t saved = spin_lock_blocking(decoded_lock);
+    if (displayed_buffer >= 0) {
+        decoded_vga_holds[displayed_buffer] = false;
+        displayed_buffer = -1;
+    }
+    spin_unlock(decoded_lock, saved);
+}
+
+/** Release the decoded framebuffer retained by the stopped PAL output. */
+static void release_pal_frame(void) {
+    const uint32_t saved = spin_lock_blocking(decoded_lock);
+    if (pal_displayed_buffer >= 0) {
+        decoded_pal_holds[pal_displayed_buffer] = false;
+        pal_displayed_buffer = -1;
+    }
+    spin_unlock(decoded_lock, saved);
+}
+
 /**
  * @brief Render a solid active VGA line and reset RGB before horizontal blank.
  *
@@ -1026,79 +1116,6 @@ static void render_solid_scanline(
     scanline_buffer->status = SCANLINE_OK;
 }
 
-/** Five-bit rows for uppercase letters A-Z followed by digits 0-9. */
-static const uint8_t signal_lost_font
-    [SIGNAL_LOST_FONT_GLYPHS][SIGNAL_LOST_GLYPH_HEIGHT] = {
-    {0x0eu, 0x11u, 0x11u, 0x1fu, 0x11u, 0x11u, 0x11u}, // A
-    {0x1eu, 0x11u, 0x11u, 0x1eu, 0x11u, 0x11u, 0x1eu}, // B
-    {0x0eu, 0x11u, 0x10u, 0x10u, 0x10u, 0x11u, 0x0eu}, // C
-    {0x1eu, 0x11u, 0x11u, 0x11u, 0x11u, 0x11u, 0x1eu}, // D
-    {0x1fu, 0x10u, 0x10u, 0x1eu, 0x10u, 0x10u, 0x1fu}, // E
-    {0x1fu, 0x10u, 0x10u, 0x1eu, 0x10u, 0x10u, 0x10u}, // F
-    {0x0eu, 0x11u, 0x10u, 0x17u, 0x11u, 0x11u, 0x0eu}, // G
-    {0x11u, 0x11u, 0x11u, 0x1fu, 0x11u, 0x11u, 0x11u}, // H
-    {0x1fu, 0x04u, 0x04u, 0x04u, 0x04u, 0x04u, 0x1fu}, // I
-    {0x07u, 0x02u, 0x02u, 0x02u, 0x12u, 0x12u, 0x0cu}, // J
-    {0x11u, 0x12u, 0x14u, 0x18u, 0x14u, 0x12u, 0x11u}, // K
-    {0x10u, 0x10u, 0x10u, 0x10u, 0x10u, 0x10u, 0x1fu}, // L
-    {0x11u, 0x1bu, 0x15u, 0x15u, 0x11u, 0x11u, 0x11u}, // M
-    {0x11u, 0x19u, 0x15u, 0x13u, 0x11u, 0x11u, 0x11u}, // N
-    {0x0eu, 0x11u, 0x11u, 0x11u, 0x11u, 0x11u, 0x0eu}, // O
-    {0x1eu, 0x11u, 0x11u, 0x1eu, 0x10u, 0x10u, 0x10u}, // P
-    {0x0eu, 0x11u, 0x11u, 0x11u, 0x15u, 0x12u, 0x0du}, // Q
-    {0x1eu, 0x11u, 0x11u, 0x1eu, 0x14u, 0x12u, 0x11u}, // R
-    {0x0eu, 0x10u, 0x10u, 0x0eu, 0x01u, 0x01u, 0x1eu}, // S
-    {0x1fu, 0x04u, 0x04u, 0x04u, 0x04u, 0x04u, 0x04u}, // T
-    {0x11u, 0x11u, 0x11u, 0x11u, 0x11u, 0x11u, 0x0eu}, // U
-    {0x11u, 0x11u, 0x11u, 0x11u, 0x11u, 0x0au, 0x04u}, // V
-    {0x11u, 0x11u, 0x11u, 0x15u, 0x15u, 0x1bu, 0x11u}, // W
-    {0x11u, 0x0au, 0x04u, 0x04u, 0x04u, 0x0au, 0x11u}, // X
-    {0x11u, 0x0au, 0x04u, 0x04u, 0x04u, 0x04u, 0x04u}, // Y
-    {0x1fu, 0x01u, 0x02u, 0x04u, 0x08u, 0x10u, 0x1fu}, // Z
-    {0x0eu, 0x11u, 0x13u, 0x15u, 0x19u, 0x11u, 0x0eu}, // 0
-    {0x04u, 0x0cu, 0x04u, 0x04u, 0x04u, 0x04u, 0x0eu}, // 1
-    {0x0eu, 0x11u, 0x01u, 0x02u, 0x04u, 0x08u, 0x1fu}, // 2
-    {0x1eu, 0x01u, 0x01u, 0x0eu, 0x01u, 0x01u, 0x1eu}, // 3
-    {0x02u, 0x06u, 0x0au, 0x12u, 0x1fu, 0x02u, 0x02u}, // 4
-    {0x1fu, 0x10u, 0x10u, 0x1eu, 0x01u, 0x01u, 0x1eu}, // 5
-    {0x0eu, 0x10u, 0x10u, 0x1eu, 0x11u, 0x11u, 0x0eu}, // 6
-    {0x1fu, 0x01u, 0x02u, 0x04u, 0x08u, 0x08u, 0x08u}, // 7
-    {0x0eu, 0x11u, 0x11u, 0x0eu, 0x11u, 0x11u, 0x0eu}, // 8
-    {0x0eu, 0x11u, 0x11u, 0x0fu, 0x01u, 0x01u, 0x0eu}, // 9
-};
-
-/**
- * @brief Obtain one row from the compact status-card font.
- *
- * @param character ASCII letter, digit, space, period, plus, or minus.
- * @param row Glyph row from zero through SIGNAL_LOST_GLYPH_HEIGHT - 1.
- * @return Five-bit row pattern with the leftmost pixel in bit four.
- */
-static uint8_t signal_lost_glyph_row(char character, unsigned row) {
-    if (character >= 'a' && character <= 'z') {
-        character = (char)(character - 'a' + 'A');
-    }
-    if (character >= 'A' && character <= 'Z') {
-        return signal_lost_font[(unsigned)(character - 'A')][row];
-    }
-    if (character >= '0' && character <= '9') {
-        return signal_lost_font[26u + (unsigned)(character - '0')][row];
-    }
-    if (character == '.') {
-        return row == 6u ? 0x04u : 0x00u;
-    }
-    if (character == '+') {
-        static const uint8_t plus[SIGNAL_LOST_GLYPH_HEIGHT] = {
-            0x00u, 0x04u, 0x04u, 0x1fu, 0x04u, 0x04u, 0x00u,
-        };
-        return plus[row];
-    }
-    if (character == '-') {
-        return row == 3u ? 0x1fu : 0x00u;
-    }
-    return 0x00u;
-}
-
 /**
  * @brief Overlay one centered line of status text on a raw VGA scanline.
  *
@@ -1113,7 +1130,8 @@ static uint8_t signal_lost_glyph_row(char character, unsigned row) {
 static void render_signal_lost_text(uint16_t *tokens, unsigned y,
                                     const char *message, unsigned top,
                                     unsigned scale, uint16_t color) {
-    if (y < top || y >= top + SIGNAL_LOST_GLYPH_HEIGHT * scale) {
+    if (y < top ||
+        y >= top + P2000M_SIGNAL_LOSS_GLYPH_HEIGHT * scale) {
         return;
     }
 
@@ -1122,17 +1140,19 @@ static void render_signal_lost_text(uint16_t *tokens, unsigned y,
         return;
     }
     const unsigned text_width =
-        (unsigned)(((SIGNAL_LOST_GLYPH_WIDTH + 1u) * length - 1u) * scale);
+        (unsigned)(((P2000M_SIGNAL_LOSS_GLYPH_WIDTH + 1u) * length - 1u) *
+                   scale);
     const unsigned text_left = (VGA_WIDTH - text_width) / 2u;
     const unsigned font_row = (y - top) / scale;
 
     for (size_t character = 0u; character < length; ++character) {
         const unsigned character_x = text_left +
-            (unsigned)character * (SIGNAL_LOST_GLYPH_WIDTH + 1u) * scale;
+            (unsigned)character *
+                (P2000M_SIGNAL_LOSS_GLYPH_WIDTH + 1u) * scale;
         const uint8_t row =
-            signal_lost_glyph_row(message[character], font_row);
+            p2000m_signal_loss_glyph_row(message[character], font_row);
         for (unsigned column = 0u;
-             column < SIGNAL_LOST_GLYPH_WIDTH; ++column) {
+             column < P2000M_SIGNAL_LOSS_GLYPH_WIDTH; ++column) {
             if ((row & (0x10u >> column)) == 0u) {
                 continue;
             }
@@ -1189,16 +1209,16 @@ static void render_signal_lost_scanline(
         }
     }
 
-    render_signal_lost_text(tokens, y, signal_lost_product,
+    render_signal_lost_text(tokens, y, P2000M_SIGNAL_LOSS_PRODUCT,
                             SIGNAL_LOST_PRODUCT_TOP,
                             SIGNAL_LOST_INFO_SCALE, text);
-    render_signal_lost_text(tokens, y, signal_lost_message,
+    render_signal_lost_text(tokens, y, P2000M_SIGNAL_LOSS_MESSAGE,
                             SIGNAL_LOST_MESSAGE_TOP,
                             SIGNAL_LOST_FONT_SCALE, text);
     render_signal_lost_text(tokens, y, signal_lost_firmware,
                             SIGNAL_LOST_FIRMWARE_TOP,
                             SIGNAL_LOST_INFO_SCALE, text);
-    render_signal_lost_text(tokens, y, signal_lost_waiting,
+    render_signal_lost_text(tokens, y, P2000M_SIGNAL_LOSS_WAITING,
                             SIGNAL_LOST_WAITING_TOP,
                             SIGNAL_LOST_INFO_SCALE, text);
 
@@ -1428,10 +1448,26 @@ static void service_pal_pause_request(void) {
     }
     if (requested) {
         pal_output_stop();
+        release_pal_frame();
     } else {
         pal_output_start();
     }
     __atomic_store_n(&pal_pause_applied, requested, __ATOMIC_RELEASE);
+}
+
+/** Acknowledge VGA producer pausing only after core 1 is outside rendering. */
+static void service_vga_pause_request(void) {
+    const bool requested =
+        __atomic_load_n(&vga_pause_requested, __ATOMIC_ACQUIRE);
+    const bool applied =
+        __atomic_load_n(&vga_pause_applied, __ATOMIC_RELAXED);
+    if (requested == applied) {
+        return;
+    }
+    if (requested) {
+        release_vga_frame();
+    }
+    __atomic_store_n(&vga_pause_applied, requested, __ATOMIC_RELEASE);
 }
 
 /**
@@ -1446,17 +1482,48 @@ static void __not_in_flash_func(vga_core_main)(void) {
         panic("Unable to initialize core 1 flash lockout");
     }
     pal_output_initialize(select_frame_for_next_pal_field);
-    pal_output_start();
+    const bool pal_paused =
+        __atomic_load_n(&pal_pause_requested, __ATOMIC_ACQUIRE);
+    if (!pal_paused) {
+        pal_output_start();
+    }
+    __atomic_store_n(&pal_pause_applied, pal_paused, __ATOMIC_RELEASE);
+    const bool vga_paused =
+        __atomic_load_n(&vga_pause_requested, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&vga_pause_applied, vga_paused, __ATOMIC_RELEASE);
     multicore_fifo_push_blocking(VGA_READY_MAGIC);
 
+    uint32_t expected_scanline_id = 0u;
+    bool expected_scanline_valid = false;
     while (true) {
         service_pal_pause_request();
+        service_vga_pause_request();
+        scanvideo_scanline_buffer_t *scanline_buffer = NULL;
+        if (!__atomic_load_n(&vga_pause_applied, __ATOMIC_ACQUIRE)) {
+            scanline_buffer = scanvideo_begin_scanline_generation(false);
+        }
+        if (scanline_buffer != NULL) {
+            const uint32_t scanline_id = scanline_buffer->scanline_id;
+            if (expected_scanline_valid && scanline_id != expected_scanline_id) {
+                __atomic_fetch_add(&vga_scanline_gaps, 1u, __ATOMIC_RELAXED);
+            }
+            const uint16_t frame = scanvideo_frame_number(scanline_id);
+            const uint16_t line = scanvideo_scanline_number(scanline_id);
+            expected_scanline_id = line + 1u < VGA_HEIGHT
+                                       ? ((uint32_t)frame << 16u) | (line + 1u)
+                                       : (uint32_t)(uint16_t)(frame + 1u) << 16u;
+            expected_scanline_valid = true;
+
+            // A ready VGA slot has the tighter deadline. PAL still retains a
+            // complete two-line DMA buffer while this one line is rendered.
+            render_scanline(scanline_buffer);
+            scanvideo_end_scanline_generation(scanline_buffer);
+        }
         pal_output_service();
-        scanvideo_scanline_buffer_t *scanline_buffer =
-            scanvideo_begin_scanline_generation(true);
-        render_scanline(scanline_buffer);
-        scanvideo_end_scanline_generation(scanline_buffer);
-        pal_output_service();
+        if (scanline_buffer == NULL) {
+            // Continue polling PAL while all VGA buffers are queued ahead.
+            tight_loop_contents();
+        }
     }
 }
 
@@ -1473,6 +1540,8 @@ static void print_statistics(void) {
 
     const uint32_t vga_frames =
         __atomic_load_n(&generated_vga_frames, __ATOMIC_RELAXED);
+    const uint32_t vga_gaps =
+        __atomic_load_n(&vga_scanline_gaps, __ATOMIC_RELAXED);
     const uint32_t swaps =
         __atomic_load_n(&source_frame_swaps, __ATOMIC_RELAXED);
     const uint32_t repeats =
@@ -1514,6 +1583,7 @@ static void print_statistics(void) {
     if (capture.last_frame_period_us == 0) {
         printf("VID2VGA capture_frames=%" PRIu32
                " waiting_for_input vga_frames=%" PRIu32
+               " vga_scanline_gaps=%" PRIu32
                " swaps=%" PRIu32 " repeats=%" PRIu32
                " blank=%" PRIu32 " displayed_sequence=%" PRIu32
                " decoded_frames=%" PRIu32 " decode_us=%" PRIu32
@@ -1521,8 +1591,8 @@ static void print_statistics(void) {
                " screen_frames=%" PRIu32
                " auto_phase_ticks=%" PRId32
                " manual_trim_ticks=%" PRId32 "\n",
-               capture.captured_frames, vga_frames, swaps, repeats, blanks,
-               sequence, decoded, decode_us, decode_max_us,
+               capture.captured_frames, vga_frames, vga_gaps, swaps, repeats,
+               blanks, sequence, decoded, decode_us, decode_max_us,
                screen_frames_sent,
                capture.auto_phase_ticks,
                capture.manual_phase_ticks);
@@ -1533,7 +1603,8 @@ static void print_statistics(void) {
     printf("VID2VGA capture_frames=%" PRIu32 " input_period_us=%" PRIu32
            " input_rate=%" PRIu32 ".%03" PRIu32
            "Hz locked=%s stale_replaced=%" PRIu32
-           " vga_frames=%" PRIu32 " swaps=%" PRIu32
+           " vga_frames=%" PRIu32 " vga_scanline_gaps=%" PRIu32
+           " swaps=%" PRIu32
            " repeats=%" PRIu32 " blank=%" PRIu32
            " displayed_sequence=%" PRIu32
            " decoded_frames=%" PRIu32 " decode_us=%" PRIu32
@@ -1548,7 +1619,7 @@ static void print_statistics(void) {
            rate_millihz / 1000u, rate_millihz % 1000u,
            capture.signal_present ? "yes" : "no",
            capture.stale_frames_replaced,
-           vga_frames, swaps, repeats, blanks, sequence,
+           vga_frames, vga_gaps, swaps, repeats, blanks, sequence,
            decoded, decode_us, decode_max_us, screen_frames_sent,
            capture.recovered_line_ticks_q16 >> 16,
            ((capture.recovered_line_ticks_q16 & 0xffffu) * 1000u) >> 16,
@@ -2085,10 +2156,69 @@ static bool request_pal_pause(bool paused) {
     return true;
 }
 
+/** Wait for core 1 to stop or resume VGA scanline production. */
+static bool request_vga_pause(bool paused) {
+    __atomic_store_n(&vga_pause_requested, paused, __ATOMIC_RELEASE);
+    const uint64_t deadline =
+        time_us_64() + (uint64_t)FLASH_LOCKOUT_TIMEOUT_MS * 1000u;
+    while (__atomic_load_n(&vga_pause_applied, __ATOMIC_ACQUIRE) != paused) {
+        if (time_us_64() >= deadline) {
+            return false;
+        }
+        tight_loop_contents();
+    }
+    return true;
+}
+
+/** Return whether the physical VGA timing generator is requested on. */
+static bool vga_output_is_enabled(void) {
+    return !__atomic_load_n(&vga_pause_requested, __ATOMIC_ACQUIRE);
+}
+
+/** Return whether the PAL DMA/PIO stream is requested on. */
+static bool pal_output_is_enabled(void) {
+    return !__atomic_load_n(&pal_pause_requested, __ATOMIC_ACQUIRE);
+}
+
+/** Enable or disable VGA timing while safely coordinating its producer. */
+static bool set_vga_output_enabled(bool enabled) {
+    if (vga_output_is_enabled() == enabled) {
+        return true;
+    }
+
+    if (enabled) {
+        if (!request_vga_pause(false)) {
+            return false;
+        }
+        scanvideo_timing_enable(true);
+    } else {
+        if (!request_vga_pause(true)) {
+            return false;
+        }
+        scanvideo_timing_enable(false);
+    }
+    configuration_dirty = true;
+    return true;
+}
+
+/** Enable or disable the PAL stream on its owning core. */
+static bool set_pal_output_enabled(bool enabled) {
+    if (pal_output_is_enabled() == enabled) {
+        return true;
+    }
+    if (!request_pal_pause(!enabled)) {
+        return false;
+    }
+    configuration_dirty = true;
+    return true;
+}
+
 /** Pause PAL before a flash lockout and resume it after the mutation. */
 static int execute_settings_flash_mutation(flash_mutation_t *mutation) {
+    const bool was_paused =
+        __atomic_load_n(&pal_pause_requested, __ATOMIC_ACQUIRE);
     if (!request_pal_pause(true)) {
-        (void)request_pal_pause(false);
+        (void)request_pal_pause(was_paused);
         return PICO_ERROR_TIMEOUT;
     }
 
@@ -2096,7 +2226,7 @@ static int execute_settings_flash_mutation(flash_mutation_t *mutation) {
                                           mutation,
                                           FLASH_LOCKOUT_TIMEOUT_MS);
 
-    if (!request_pal_pause(false)) {
+    if (!request_pal_pause(was_paused)) {
         return PICO_ERROR_TIMEOUT;
     }
     return result;
@@ -2125,6 +2255,13 @@ static int save_current_configuration(void) {
     if (style.vertical_stretch_enabled) {
         display_flags |= DISPLAY_FLAG_VERTICAL_STRETCH;
     }
+    uint8_t output_flags = 0u;
+    if (vga_output_is_enabled()) {
+        output_flags |= OUTPUT_FLAG_VGA_ENABLED;
+    }
+    if (pal_output_is_enabled()) {
+        output_flags |= OUTPUT_FLAG_PAL_ENABLED;
+    }
     const unsigned target_slot = saved_settings_slot < 0
                                      ? 0u
                                      : ((unsigned)saved_settings_slot ^ 1u);
@@ -2139,7 +2276,7 @@ static int save_current_configuration(void) {
         .display_flags = display_flags,
         .phosphor_noise_level = style.phosphor_noise_level,
         .manual_phase_ticks = (int8_t)capture.manual_phase_ticks,
-        .reserved = 0u,
+        .output_flags = output_flags,
         .checksum = 0u,
     };
     record.checksum =
@@ -2242,7 +2379,7 @@ static void print_display_settings(void) {
     printf("DISPLAY foreground=#%06" PRIx32 " background=#%06" PRIx32
            " border=%s border_color=#%06" PRIx32
            " border_style=%s scale=%s noise=%s phase_trim=%" PRId32
-           " storage=%s\n",
+           " storage=%s vga=%s pal=%s\n",
            style.foreground_rgb, style.background_rgb,
            style.border_enabled ? "on" : "off",
            style.border_rgb,
@@ -2250,7 +2387,9 @@ static void print_display_settings(void) {
            style.vertical_stretch_enabled ? "fit-5:3" : "native-1:1",
            phosphor_noise_level_name(style.phosphor_noise_level),
            capture.manual_phase_ticks,
-           storage_state);
+           storage_state,
+           vga_output_is_enabled() ? "on" : "off",
+           pal_output_is_enabled() ? "on" : "off");
 }
 
 /**
@@ -2371,6 +2510,8 @@ static void print_help(void) {
            "  log                        stream statistics every two seconds\n"
            "  screen [raw|packbits]      enter continuous binary screen mode\n"
            "  settings                   current runtime and storage settings\n"
+           "  vga on|off|toggle          control the physical VGA output\n"
+           "  pal on|off|toggle          control PAL composite output\n"
            "  border [on|off|toggle]     control the visible-area rectangle\n"
            "  border-color <color>       set the independent border color\n"
            "  border-style solid|dotted  select the border pattern\n"
@@ -2433,6 +2574,37 @@ static void set_border_color(const char *argument) {
     print_display_settings();
 }
 
+/** Apply an on/off/toggle command to one physical video output. */
+static void configure_physical_output(const char *name, const char *argument,
+                                      bool vga) {
+    const bool current = vga ? vga_output_is_enabled()
+                             : pal_output_is_enabled();
+    bool enabled;
+    if (strcmp(argument, "on") == 0 || strcmp(argument, "enable") == 0) {
+        enabled = true;
+    } else if (strcmp(argument, "off") == 0 ||
+               strcmp(argument, "disable") == 0) {
+        enabled = false;
+    } else if (strcmp(argument, "toggle") == 0) {
+        enabled = !current;
+    } else if (*argument == '\0') {
+        print_display_settings();
+        return;
+    } else {
+        printf("Usage: %s on|off|toggle\n", name);
+        return;
+    }
+
+    const bool changed = vga ? set_vga_output_enabled(enabled)
+                             : set_pal_output_enabled(enabled);
+    if (!changed) {
+        printf("Unable to %s %s output within the coordination timeout.\n",
+               enabled ? "enable" : "disable", name);
+        return;
+    }
+    print_display_settings();
+}
+
 /**
  * @brief Interpret and execute one complete USB command line.
  *
@@ -2458,6 +2630,11 @@ static void process_usb_command(char *command) {
     } else if (strcmp(command, "screen") == 0 ||
                strcmp(command, "stream") == 0) {
         enter_usb_screen_mode(argument);
+    } else if (strcmp(command, "vga") == 0) {
+        configure_physical_output("vga", argument, true);
+    } else if (strcmp(command, "pal") == 0 ||
+               strcmp(command, "composite") == 0) {
+        configure_physical_output("pal", argument, false);
     } else if (strcmp(command, "settings") == 0) {
         print_display_settings();
     } else if (strcmp(command, "colors") == 0) {
@@ -2552,8 +2729,13 @@ static void process_usb_command(char *command) {
             if (!p2000m_capture_set_sample_phase(0)) {
                 panic("Unable to reset manual phase trim");
             }
-            configuration_dirty = false;
-            printf("Saved settings erased; factory defaults restored.\n");
+            const bool vga_restored = set_vga_output_enabled(true);
+            const bool pal_restored = set_pal_output_enabled(true);
+            configuration_dirty = !(vga_restored && pal_restored);
+            printf(vga_restored && pal_restored
+                       ? "Saved settings erased; factory defaults restored.\n"
+                       : "Saved settings erased, but an output could not be "
+                         "re-enabled.\n");
             print_display_settings();
         } else {
             printf("Unable to erase saved settings (error=%d).\n", result);
@@ -2717,7 +2899,14 @@ int main(void) {
     stdio_init_all();
     validate_settings_flash_region();
     display_style_t initial_style = default_display_style();
-    restored_saved_settings = load_saved_configuration(&initial_style);
+    bool initial_vga_enabled = true;
+    bool initial_pal_enabled = true;
+    restored_saved_settings = load_saved_configuration(
+        &initial_style, &initial_vga_enabled, &initial_pal_enabled);
+    __atomic_store_n(&vga_pause_requested, !initial_vga_enabled,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&pal_pause_requested, !initial_pal_enabled,
+                     __ATOMIC_RELEASE);
     configuration_dirty = false;
     initialize_display_styles(&initial_style);
 
@@ -2738,7 +2927,9 @@ int main(void) {
     if (multicore_fifo_pop_blocking() != VGA_READY_MAGIC) {
         panic("Unable to start VGA rendering core");
     }
-    scanvideo_timing_enable(true);
+    if (initial_vga_enabled) {
+        scanvideo_timing_enable(true);
+    }
 
     bool announced = false;
     uint64_t next_automatic_tune = time_us_64() + 250000u;

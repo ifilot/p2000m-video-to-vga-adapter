@@ -3,7 +3,7 @@
 
 cmake_minimum_required(VERSION 3.21)
 
-project(p2000m_vid2vga_viewer VERSION 0.4.0 LANGUAGES C CXX)
+project(p2000m_vid2vga_viewer VERSION 0.5.0 LANGUAGES C CXX)
 
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/package-version.txt"
     "${PROJECT_VERSION}\n")
@@ -37,11 +37,15 @@ set(P2000M_VIEWER_SOURCES
 
 if(WIN32)
     enable_language(RC)
+    set(P2000M_WINDOWS_ICON
+        "${CMAKE_CURRENT_LIST_DIR}/assets/p2000m-vid2vga-viewer.ico")
     configure_file(
         version.rc.in
         ${CMAKE_CURRENT_BINARY_DIR}/version.rc
         @ONLY
     )
+    set_property(SOURCE ${CMAKE_CURRENT_BINARY_DIR}/version.rc
+        APPEND PROPERTY OBJECT_DEPENDS "${P2000M_WINDOWS_ICON}")
     list(APPEND P2000M_VIEWER_SOURCES
         ${CMAKE_CURRENT_BINARY_DIR}/version.rc
     )
@@ -186,6 +190,7 @@ if(BUILD_TESTING)
     add_executable(p2000m-pal-waveform-test
         ../tests/pal_waveform_test.cpp
         ../src/pal_waveform.c
+        ../src/p2000m_signal_loss.c
     )
     target_include_directories(p2000m-pal-waveform-test PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/../src

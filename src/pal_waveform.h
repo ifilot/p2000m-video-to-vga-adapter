@@ -27,6 +27,15 @@ enum {
     PAL_FIELD1_LAST_LINE = 310,
     PAL_FIELD2_FIRST_LINE = 336,
     PAL_FIELD2_LAST_LINE = 623,
+    /** Signal-loss card geometry in 640 x 288 source coordinates. */
+    PAL_SIGNAL_LOST_PANEL_LEFT = 90,
+    PAL_SIGNAL_LOST_PANEL_RIGHT = 550,
+    PAL_SIGNAL_LOST_PANEL_TOP = 48,
+    PAL_SIGNAL_LOST_PANEL_BOTTOM = 240,
+    PAL_SIGNAL_LOST_PANEL_BORDER = 3,
+    PAL_SIGNAL_LOST_PRODUCT_TOP = 78,
+    PAL_SIGNAL_LOST_MESSAGE_TOP = 118,
+    PAL_SIGNAL_LOST_WAITING_TOP = 180,
 };
 
 enum pal_level {
@@ -39,7 +48,11 @@ enum pal_level {
 extern "C" {
 #endif
 
-/** Build one packed 896-sample line from an optional decoded framebuffer. */
+/**
+ * Build one packed 896-sample line from an optional decoded framebuffer.
+ *
+ * A null framebuffer renders the monochrome signal-loss card on active lines.
+ */
 void pal_waveform_build_line(uint32_t words[PAL_WORDS_PER_LINE], unsigned line,
                              const uint32_t *decoded_frame);
 

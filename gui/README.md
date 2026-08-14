@@ -30,14 +30,17 @@ for operational information: the active COM port, source frame number,
 cumulative CRC errors for the current capture, and recording state.
 
 The **Adapter > Configure Adapter** dialog controls foreground, background,
-border color and style, vertical scaling, foreground phosphor grain, and
-sampling-phase trim. **Apply** changes the running configuration; **Apply &
-Save** also stores it in the adapter's redundant flash settings slots. The
-viewer briefly pauses screen traffic, uses the firmware's normal USB console
-commands, and resumes the binary stream on the same COM port. Grain controls
-are disabled when connected to firmware older than v0.4.0. The foreground can
-be selected from Matrix green, retro amber, and warm off-white presets or from
-the unrestricted custom color picker.
+border color and style, vertical scaling, foreground phosphor grain,
+sampling-phase trim, and the independent physical VGA and PAL composite
+outputs. USB screen streaming remains available with either or both physical
+outputs disabled. **Apply** changes the running configuration; **Apply & Save**
+also stores it in the adapter's redundant flash settings slots. The viewer
+briefly pauses screen traffic, uses the firmware's normal USB console commands,
+and resumes the binary stream on the same COM port. Grain controls are disabled
+when connected to firmware older than v0.4.0; output controls are disabled when
+the connected firmware does not advertise them. The foreground can be selected
+from Matrix green, retro amber, and warm off-white presets or from the
+unrestricted custom color picker.
 
 The menu bar also provides connection controls, lossless framebuffer
 screenshots, and MP4 recordings under **File**, plus application and license

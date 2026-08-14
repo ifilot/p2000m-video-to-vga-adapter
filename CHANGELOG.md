@@ -5,23 +5,37 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Changelog
 
-All notable changes to the P2000M VID2VGA firmware are documented here. The
+All notable changes to the P2000M VID2VGA project are documented here. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and releases use [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-14
+
 ### Added
 
 - Simultaneous VGA and PAL-compatible monochrome 625/50 composite output on
-  GPIO14-15, using true 2:1 interlace, a 14 MHz PIO sample clock, and four small
-  scanline buffers arranged as two chained DMA transfers.
+  GPIO14-15, using the RP2350's dedicated PIO2 block, true 2:1 interlace, a
+  14 MHz sample clock, and four small scanline buffers arranged as two chained
+  DMA transfers.
 - Independent decoded-frame holds for VGA, PAL, and USB consumers, with PAL
   field-boundary frame selection and composite underrun statistics.
+- Cooperative core-1 VGA/PAL scheduling, packed PAL pixel expansion, and an
+  SRAM-resident PAL hot path for stable simultaneous output.
+- Independent, persistable VGA and PAL output enable controls in the firmware
+  console and viewer configuration dialog; USB capture remains available when
+  both physical outputs are disabled.
+- Backward-compatible viewer parsing for both legacy and output-aware firmware
+  settings records.
+- A monochrome `SIGNAL LOST` composite status card which retains valid PAL
+  synchronization and disappears automatically when stable capture resumes.
+- Application artwork based on the physical adapter PCB, including a 512 px
+  desktop icon and a multi-resolution Windows executable icon.
 
-### Fixed
+### Changed
 
-- Use the Pico SDK default-descriptor TinyUSB linkage consistently instead of
+- Standardized on the Pico SDK default-descriptor TinyUSB linkage instead of
   simultaneously requesting the application-descriptor library variant.
 
 ## [0.4.0] - 2026-08-12
@@ -199,6 +213,8 @@ and releases use [Semantic Versioning](https://semver.org/).
 - Pico 2/RP2350 project defaults and an early, actionable error when the Arm
   cross-compiler is not installed.
 
+[Unreleased]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.3.0...v0.3.1
