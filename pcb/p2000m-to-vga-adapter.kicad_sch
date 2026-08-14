@@ -490,7 +490,7 @@
 			)
 			(embedded_fonts no)
 		)
-		(symbol "Connector:Conn_01x06_Pin"
+		(symbol "Connector:Conn_Coaxial"
 			(pin_names
 				(offset 1.016)
 				(hide yes)
@@ -501,7 +501,7 @@
 			(in_pos_files yes)
 			(duplicate_pin_numbers_are_jumpers no)
 			(property "Reference" "J"
-				(at 0 7.62 0)
+				(at 0.254 3.048 0)
 				(show_name no)
 				(do_not_autoplace no)
 				(effects
@@ -510,8 +510,8 @@
 					)
 				)
 			)
-			(property "Value" "Conn_01x06_Pin"
-				(at 0 -10.16 0)
+			(property "Value" "Conn_Coaxial"
+				(at 2.921 0 90)
 				(show_name no)
 				(do_not_autoplace no)
 				(effects
@@ -542,7 +542,7 @@
 					)
 				)
 			)
-			(property "Description" "Generic connector, single row, 01x06, script generated"
+			(property "Description" "coaxial connector (BNC, SMA, SMB, SMC, Cinch/RCA, LEMO, ...)"
 				(at 0 0 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -553,17 +553,7 @@
 					)
 				)
 			)
-			(property "ki_locked" ""
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "ki_keywords" "connector"
+			(property "ki_keywords" "BNC SMA SMB SMC LEMO coaxial connector CINCH RCA MCX MMCX U.FL UMRF"
 				(at 0 0 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -574,7 +564,7 @@
 					)
 				)
 			)
-			(property "ki_fp_filters" "Connector*:*_1x??_*"
+			(property "ki_fp_filters" "*BNC* *SMA* *SMB* *SMC* *Cinch* *LEMO* *UMRF* *MCX* *U.FL*"
 				(at 0 0 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -585,79 +575,48 @@
 					)
 				)
 			)
-			(symbol "Conn_01x06_Pin_1_1"
-				(rectangle
-					(start 0.8636 5.207)
-					(end 0 4.953)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type outline)
-					)
-				)
-				(rectangle
-					(start 0.8636 2.667)
-					(end 0 2.413)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type outline)
-					)
-				)
-				(rectangle
-					(start 0.8636 0.127)
-					(end 0 -0.127)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type outline)
-					)
-				)
-				(rectangle
-					(start 0.8636 -2.413)
-					(end 0 -2.667)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type outline)
-					)
-				)
-				(rectangle
-					(start 0.8636 -4.953)
-					(end 0 -5.207)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type outline)
-					)
-				)
-				(rectangle
-					(start 0.8636 -7.493)
-					(end 0 -7.747)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type outline)
-					)
-				)
+			(symbol "Conn_Coaxial_0_1"
 				(polyline
 					(pts
-						(xy 1.27 5.08) (xy 0.8636 5.08)
+						(xy -2.54 0) (xy -0.508 0)
 					)
 					(stroke
-						(width 0.1524)
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(arc
+					(start 1.778 0)
+					(mid 0.222 -1.8079)
+					(end -1.778 -0.508)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(arc
+					(start -1.778 0.508)
+					(mid 0.2221 1.8084)
+					(end 1.778 0)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(circle
+					(center 0 0)
+					(radius 0.508)
+					(stroke
+						(width 0.2032)
 						(type default)
 					)
 					(fill
@@ -666,68 +625,22 @@
 				)
 				(polyline
 					(pts
-						(xy 1.27 2.54) (xy 0.8636 2.54)
+						(xy 0 -2.54) (xy 0 -1.778)
 					)
 					(stroke
-						(width 0.1524)
+						(width 0)
 						(type default)
 					)
 					(fill
 						(type none)
 					)
 				)
-				(polyline
-					(pts
-						(xy 1.27 0) (xy 0.8636 0)
-					)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 1.27 -2.54) (xy 0.8636 -2.54)
-					)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 1.27 -5.08) (xy 0.8636 -5.08)
-					)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 1.27 -7.62) (xy 0.8636 -7.62)
-					)
-					(stroke
-						(width 0.1524)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
+			)
+			(symbol "Conn_Coaxial_1_1"
 				(pin passive line
-					(at 5.08 5.08 180)
-					(length 3.81)
-					(name "Pin_1"
+					(at -5.08 0 0)
+					(length 2.54)
+					(name "In"
 						(effects
 							(font
 								(size 1.27 1.27)
@@ -743,9 +656,9 @@
 					)
 				)
 				(pin passive line
-					(at 5.08 2.54 180)
-					(length 3.81)
-					(name "Pin_2"
+					(at 0 -5.08 90)
+					(length 2.54)
+					(name "Ext"
 						(effects
 							(font
 								(size 1.27 1.27)
@@ -753,78 +666,6 @@
 						)
 					)
 					(number "2"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 5.08 0 180)
-					(length 3.81)
-					(name "Pin_3"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "3"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 5.08 -2.54 180)
-					(length 3.81)
-					(name "Pin_4"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "4"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 5.08 -5.08 180)
-					(length 3.81)
-					(name "Pin_5"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "5"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 5.08 -7.62 180)
-					(length 3.81)
-					(name "Pin_6"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "6"
 						(effects
 							(font
 								(size 1.27 1.27)
@@ -3983,8 +3824,20 @@
 		(uuid "036e2e06-a36d-42e6-8763-e6d41ed3aa90")
 	)
 	(rectangle
+		(start 229.87 114.3)
+		(end 281.94 163.83)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(fill
+			(type none)
+		)
+		(uuid "2a0dd68b-3e08-4d9d-b06e-71846fe9c6ec")
+	)
+	(rectangle
 		(start 127 13.97)
-		(end 228.6 161.29)
+		(end 228.6 119.38)
 		(stroke
 			(width 0)
 			(type default)
@@ -4018,6 +3871,18 @@
 		)
 		(uuid "bb21ca60-fbf0-469b-91e7-1bd5e799c202")
 	)
+	(rectangle
+		(start 127 120.65)
+		(end 228.6 143.51)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(fill
+			(type none)
+		)
+		(uuid "d3d323eb-8dd4-4db9-a38a-77fb5e3f2954")
+	)
 	(text "VGA interface + DAC array"
 		(exclude_from_sim no)
 		(at 231.14 16.51 0)
@@ -4039,6 +3904,17 @@
 			(justify left)
 		)
 		(uuid "23f1338e-23d0-4b60-8bfe-a7b9c361cd1e")
+	)
+	(text "Composite output (currently PAL)"
+		(exclude_from_sim no)
+		(at 128.016 123.698 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "4a35dae5-e0e4-48e1-95d4-c057e8779b41")
 	)
 	(text "P2000M input conditioning: 1 kΩ resistors limit transient current, BAT54A diodes clamp negative undershoot,\nand 74LVC1G14 Schmitt-trigger inverters translate and clean the 5 V-class signals to 3.3 V RP2350 logic.\nOutputs are inverted."
 		(exclude_from_sim no)
@@ -4144,6 +4020,12 @@
 		(uuid "659f7bc6-2af6-4514-8f47-1df91c339d26")
 	)
 	(junction
+		(at 157.48 128.27)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "7f526e9c-4217-4ffc-9ac6-7604064a5938")
+	)
+	(junction
 		(at 46.99 124.46)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -4210,10 +4092,6 @@
 		(uuid "fcb87e73-1866-43a5-8683-d85eaa9905a2")
 	)
 	(no_connect
-		(at 157.48 99.06)
-		(uuid "0ad0ccad-46f3-40a3-b29b-fb9c6866155f")
-	)
-	(no_connect
 		(at 203.2 76.2)
 		(uuid "135e3ff5-41f1-407a-b81c-24fb881ed156")
 	)
@@ -4260,10 +4138,6 @@
 	(no_connect
 		(at 273.05 52.07)
 		(uuid "a62acaa1-10b6-4ab3-96de-1df26c7c3f10")
-	)
-	(no_connect
-		(at 157.48 96.52)
-		(uuid "a7248ba0-16a7-4e9d-bdea-0eda7f4c3d57")
 	)
 	(no_connect
 		(at 203.2 83.82)
@@ -4314,6 +4188,16 @@
 			(type default)
 		)
 		(uuid "17be9747-e8fc-4966-922b-7323f6b1c2c3")
+	)
+	(wire
+		(pts
+			(xy 154.94 135.89) (xy 157.48 135.89)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "17e951e5-ff61-4653-933f-cb28e552407a")
 	)
 	(wire
 		(pts
@@ -4547,6 +4431,16 @@
 	)
 	(wire
 		(pts
+			(xy 154.94 128.27) (xy 157.48 128.27)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "5c908022-88b2-4603-8055-d37c72b79fe8")
+	)
+	(wire
+		(pts
 			(xy 247.65 69.85) (xy 248.92 69.85)
 		)
 		(stroke
@@ -4554,6 +4448,16 @@
 			(type default)
 		)
 		(uuid "5d082154-4460-4637-9602-0afae9e1beba")
+	)
+	(wire
+		(pts
+			(xy 157.48 128.27) (xy 160.02 128.27)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "60b63805-3fe5-4751-ba08-49e3e58d3400")
 	)
 	(wire
 		(pts
@@ -4574,6 +4478,16 @@
 			(type default)
 		)
 		(uuid "6ba7d46c-952a-4183-acca-5cb22a1937d8")
+	)
+	(wire
+		(pts
+			(xy 139.7 135.89) (xy 149.86 135.89)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "7507b741-e891-41b5-8a82-2ab84e9f8394")
 	)
 	(wire
 		(pts
@@ -4734,6 +4648,16 @@
 			(type default)
 		)
 		(uuid "a8df66ea-39e1-4db9-a9fe-6f5ee8b67ff9")
+	)
+	(wire
+		(pts
+			(xy 157.48 135.89) (xy 157.48 128.27)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ae6b392a-9a8a-4c25-9c80-cc01fe5bc285")
 	)
 	(wire
 		(pts
@@ -5031,30 +4955,6 @@
 			)
 		)
 	)
-	(global_label "V"
-		(shape input)
-		(at 80.01 168.91 0)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left)
-		)
-		(uuid "04505110-5a1f-42b1-85ea-e5b225f8e17a")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 84.0838 168.91 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-	)
 	(global_label "VGA_VSYNC"
 		(shape input)
 		(at 269.24 68.58 180)
@@ -5099,30 +4999,6 @@
 			)
 		)
 	)
-	(global_label "G"
-		(shape input)
-		(at 80.01 163.83 0)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left)
-		)
-		(uuid "12f711c9-a2ad-462e-b63b-0f188ebce55d")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 84.2652 163.83 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-	)
 	(global_label "VGA_R0"
 		(shape input)
 		(at 242.57 46.99 180)
@@ -5164,30 +5040,6 @@
 				(font
 					(size 1.27 1.27)
 				)
-			)
-		)
-	)
-	(global_label "B"
-		(shape input)
-		(at 80.01 166.37 0)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left)
-		)
-		(uuid "1bccc893-dbc3-4310-9b4e-17245ea567a3")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 84.2652 166.37 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
 			)
 		)
 	)
@@ -5324,30 +5176,6 @@
 					(size 1.27 1.27)
 				)
 				(justify right)
-			)
-		)
-	)
-	(global_label "H"
-		(shape input)
-		(at 80.01 171.45 0)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left)
-		)
-		(uuid "46f1497c-ec71-488b-aa85-59daf5571c7e")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 84.3257 171.45 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
 			)
 		)
 	)
@@ -5490,6 +5318,30 @@
 					(size 1.27 1.27)
 				)
 				(justify left)
+			)
+		)
+	)
+	(global_label "COMP0"
+		(shape input)
+		(at 157.48 96.52 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "69086838-e5e5-4adb-b018-70a186644e56")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 147.9634 96.52 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
 			)
 		)
 	)
@@ -5791,30 +5643,6 @@
 			)
 		)
 	)
-	(global_label "R"
-		(shape input)
-		(at 80.01 161.29 0)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left)
-		)
-		(uuid "9b56cec9-df0d-4fb3-a328-d464a705b48d")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 84.2652 161.29 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-	)
 	(global_label "HSYNC"
 		(shape input)
 		(at 34.29 168.91 0)
@@ -5836,6 +5664,30 @@
 					(size 1.27 1.27)
 				)
 				(justify left)
+			)
+		)
+	)
+	(global_label "COMP1"
+		(shape input)
+		(at 139.7 135.89 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "9ce8f7c3-fe4b-420f-a16b-5958f7387159")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 130.1834 135.89 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
 			)
 		)
 	)
@@ -6135,6 +5987,30 @@
 			)
 		)
 	)
+	(global_label "COMP0"
+		(shape input)
+		(at 139.7 128.27 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "d90ed24d-39a5-4c0f-8cfc-5a72cb007065")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 130.1834 128.27 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+	)
 	(global_label "B"
 		(shape input)
 		(at 254 87.63 270)
@@ -6248,6 +6124,30 @@
 				(font
 					(size 1.27 1.27)
 				)
+			)
+		)
+	)
+	(global_label "COMP1"
+		(shape input)
+		(at 157.48 99.06 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "fb78118a-ba81-4e9e-9e89-76c8f67d6ddd")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 147.9634 99.06 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
 			)
 		)
 	)
@@ -7019,98 +6919,6 @@
 		)
 	)
 	(symbol
-		(lib_id "Connector:Conn_01x06_Pin")
-		(at 74.93 166.37 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "243f6db7-2d4b-4a55-926d-c83e873f54ce")
-		(property "Reference" "J4"
-			(at 75.565 156.21 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "VGA"
-			(at 75.565 158.75 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical"
-			(at 74.93 166.37 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 74.93 166.37 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Generic connector, single row, 01x06, script generated"
-			(at 74.93 166.37 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "2"
-			(uuid "2d19e6cf-dc8d-49db-87f9-c6c36ea21b38")
-		)
-		(pin "4"
-			(uuid "60f9c099-56f1-42cd-aa30-0a802e0e77e4")
-		)
-		(pin "6"
-			(uuid "03c82b72-c99e-4abb-b7bf-a6b4cbea9215")
-		)
-		(pin "3"
-			(uuid "d0a2a31e-2cf6-4637-9a92-591a1326f17f")
-		)
-		(pin "1"
-			(uuid "42fc3625-1868-4004-8b18-2b72ae1110a1")
-		)
-		(pin "5"
-			(uuid "280726b8-cc16-45ab-8209-744c0197ac48")
-		)
-		(instances
-			(project "p2000m-to-vga-adapter"
-				(path "/69ec2d49-b46e-43a1-a00b-1fb2fc89813d"
-					(reference "J4")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "Device:R_Small")
 		(at 245.11 62.23 270)
 		(unit 1)
@@ -7599,6 +7407,86 @@
 		)
 	)
 	(symbol
+		(lib_id "Connector:Conn_Coaxial")
+		(at 165.1 128.27 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "46c8c583-8b14-4d5f-9f54-82566ec55761")
+		(property "Reference" "J7"
+			(at 167.64 128.905 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "Composite"
+			(at 167.64 131.2164 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "components:RCJ-014"
+			(at 165.1 128.27 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 165.1 128.27 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 165.1 128.27 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "e94603d8-d079-4844-8bdc-a19a37ac4fd6")
+		)
+		(pin "2"
+			(uuid "7bf8b995-bcec-485c-bdbb-81090aa69373")
+		)
+		(instances
+			(project "p2000m-to-vga-adapter"
+				(path "/69ec2d49-b46e-43a1-a00b-1fb2fc89813d"
+					(reference "J7")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "power:GND")
 		(at 142.24 53.34 270)
 		(unit 1)
@@ -8047,6 +7935,95 @@
 			(project "p2000m-to-vga-adapter"
 				(path "/69ec2d49-b46e-43a1-a00b-1fb2fc89813d"
 					(reference "#PWR026")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R_Small")
+		(at 142.24 128.27 90)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "5715c428-50cf-4319-bf9c-19df4c81673e")
+		(property "Reference" "R45"
+			(at 142.24 133.2484 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "220"
+			(at 142.24 130.937 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0805_2012Metric_Pad1.20x1.40mm_HandSolder"
+			(at 142.24 128.27 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 142.24 128.27 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 142.24 128.27 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "LCSC Part #" "C17557"
+			(at 142.24 128.27 270)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "2"
+			(uuid "14c5f523-2e77-49e1-bcfa-8604122c5ce6")
+		)
+		(pin "1"
+			(uuid "621296cf-3d7d-4989-998b-69f49e549e3f")
+		)
+		(instances
+			(project "p2000m-to-vga-adapter"
+				(path "/69ec2d49-b46e-43a1-a00b-1fb2fc89813d"
+					(reference "R45")
 					(unit 1)
 				)
 			)
@@ -8678,6 +8655,95 @@
 		)
 	)
 	(symbol
+		(lib_id "Device:R_Small")
+		(at 152.4 128.27 90)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "6d66a97a-ef4f-4960-a0dc-ae8d7abdfcd9")
+		(property "Reference" "R43"
+			(at 152.4 133.2484 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "220"
+			(at 152.4 130.937 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0805_2012Metric_Pad1.20x1.40mm_HandSolder"
+			(at 152.4 128.27 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 152.4 128.27 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 152.4 128.27 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "LCSC Part #" "C17557"
+			(at 152.4 128.27 270)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "2"
+			(uuid "42fed30a-1bd8-41b8-99b5-b55df0fff8a2")
+		)
+		(pin "1"
+			(uuid "dfbbb717-8cc3-4dd9-b37a-c6c4404c0b55")
+		)
+		(instances
+			(project "p2000m-to-vga-adapter"
+				(path "/69ec2d49-b46e-43a1-a00b-1fb2fc89813d"
+					(reference "R43")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "power:GND")
 		(at 105.41 69.85 0)
 		(unit 1)
@@ -8750,6 +8816,95 @@
 			(project "p2000m-to-vga-adapter"
 				(path "/69ec2d49-b46e-43a1-a00b-1fb2fc89813d"
 					(reference "#PWR012")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R_Small")
+		(at 152.4 135.89 90)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "70d8bc2e-87bf-496f-bea6-9ca535cd7587")
+		(property "Reference" "R46"
+			(at 152.4 140.8684 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "220"
+			(at 152.4 138.557 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0805_2012Metric_Pad1.20x1.40mm_HandSolder"
+			(at 152.4 135.89 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 152.4 135.89 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 152.4 135.89 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "LCSC Part #" "C17557"
+			(at 152.4 135.89 270)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "2"
+			(uuid "dd4243ed-b9c6-415e-8928-dde1ad5c4190")
+		)
+		(pin "1"
+			(uuid "8b83bb83-9f3e-4920-a0e1-c151a52f517d")
+		)
+		(instances
+			(project "p2000m-to-vga-adapter"
+				(path "/69ec2d49-b46e-43a1-a00b-1fb2fc89813d"
+					(reference "R46")
 					(unit 1)
 				)
 			)
@@ -9835,6 +9990,84 @@
 			(project "p2000m-to-vga-adapter"
 				(path "/69ec2d49-b46e-43a1-a00b-1fb2fc89813d"
 					(reference "C1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 165.1 133.35 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "99c5abdf-e30b-4187-a207-23e9b05b0aef")
+		(property "Reference" "#PWR027"
+			(at 165.1 139.7 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "GND"
+			(at 165.1 138.43 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 165.1 133.35 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 165.1 133.35 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 165.1 133.35 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "0f4678d8-8ba3-4779-a97c-37d02c4798ed")
+		)
+		(instances
+			(project "p2000m-to-vga-adapter"
+				(path "/69ec2d49-b46e-43a1-a00b-1fb2fc89813d"
+					(reference "#PWR027")
 					(unit 1)
 				)
 			)
@@ -11007,6 +11240,95 @@
 		)
 	)
 	(symbol
+		(lib_id "Device:R_Small")
+		(at 147.32 128.27 90)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "e1dc2320-efa3-4783-bdbf-6200b1d938dd")
+		(property "Reference" "R44"
+			(at 147.32 133.2484 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "220"
+			(at 147.32 130.937 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0805_2012Metric_Pad1.20x1.40mm_HandSolder"
+			(at 147.32 128.27 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 147.32 128.27 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 147.32 128.27 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "LCSC Part #" "C17557"
+			(at 147.32 128.27 270)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "2"
+			(uuid "736bb8b3-ad16-462b-b90d-082800968236")
+		)
+		(pin "1"
+			(uuid "c5206891-e418-44c4-a842-2eede11d2540")
+		)
+		(instances
+			(project "p2000m-to-vga-adapter"
+				(path "/69ec2d49-b46e-43a1-a00b-1fb2fc89813d"
+					(reference "R44")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "power:+3V3")
 		(at 68.58 85.09 90)
 		(unit 1)
@@ -11413,85 +11735,6 @@
 			(project "p2000m-to-vga-adapter"
 				(path "/69ec2d49-b46e-43a1-a00b-1fb2fc89813d"
 					(reference "#PWR070")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:GND")
-		(at 80.01 173.99 90)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "ec6f543d-ffe4-4b69-ab24-8fc441f4800a")
-		(property "Reference" "#PWR024"
-			(at 86.36 173.99 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "GND"
-			(at 83.82 173.9899 90)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
-		(property "Footprint" ""
-			(at 80.01 173.99 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 80.01 173.99 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 80.01 173.99 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "a03a5191-bdcd-4299-bff8-15406acfc53b")
-		)
-		(instances
-			(project "p2000m-to-vga-adapter"
-				(path "/69ec2d49-b46e-43a1-a00b-1fb2fc89813d"
-					(reference "#PWR024")
 					(unit 1)
 				)
 			)

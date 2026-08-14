@@ -5,6 +5,8 @@ set(FIRMWARE_TARGET p2000m_vid2vga_firmware)
 
 add_executable(${FIRMWARE_TARGET}
     firmware.c
+    pal_output.c
+    pal_waveform.c
     p2000m_capture.c
 )
 
@@ -19,13 +21,15 @@ set_target_properties(${FIRMWARE_TARGET} PROPERTIES
 pico_generate_pio_header(${FIRMWARE_TARGET}
     ${CMAKE_CURRENT_LIST_DIR}/p2000m_capture.pio
 )
+pico_generate_pio_header(${FIRMWARE_TARGET}
+    ${CMAKE_CURRENT_LIST_DIR}/composite.pio
+)
 
 target_link_libraries(${FIRMWARE_TARGET} PRIVATE
     pico_stdlib
     pico_flash
     pico_multicore
     pico_scanvideo_dpi
-    tinyusb_device
     hardware_dma
     hardware_flash
     hardware_pio
@@ -60,6 +64,8 @@ target_compile_definitions(${FIRMWARE_TARGET} PRIVATE
 )
 
 set_source_files_properties(
+    pal_output.c
+    pal_waveform.c
     p2000m_capture.c
     firmware.c
     PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Wpedantic"

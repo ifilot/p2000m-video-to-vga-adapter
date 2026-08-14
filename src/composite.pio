@@ -1,0 +1,26 @@
+; SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
+; SPDX-License-Identifier: GPL-3.0-or-later
+
+.program composite
+
+; Emit one packed two-bit composite-video sample on every PIO clock. The
+; earliest sample is stored in bits 1:0 of each DMA word.
+.wrap_target
+    out pins, 2
+.wrap
+
+% c-sdk {
+static inline void composite_program_init(PIO pio, uint sm, uint offset,
+                                          uint pin_base, uint16_t clkdiv) {
+    pio_gpio_init(pio, pin_base);
+    pio_gpio_init(pio, pin_base + 1u);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_base, 2u, true);
+
+    pio_sm_config config = composite_program_get_default_config(offset);
+    sm_config_set_out_pins(&config, pin_base, 2u);
+    sm_config_set_out_shift(&config, true, true, 32u);
+    sm_config_set_fifo_join(&config, PIO_FIFO_JOIN_TX);
+    sm_config_set_clkdiv_int_frac8(&config, clkdiv, 0u);
+    pio_sm_init(pio, sm, offset, &config);
+}
+%}

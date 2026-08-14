@@ -9,6 +9,21 @@ All notable changes to the P2000M VID2VGA firmware are documented here. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and releases use [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Simultaneous VGA and PAL-compatible monochrome 625/50 composite output on
+  GPIO14-15, using true 2:1 interlace, a 14 MHz PIO sample clock, and four small
+  scanline buffers arranged as two chained DMA transfers.
+- Independent decoded-frame holds for VGA, PAL, and USB consumers, with PAL
+  field-boundary frame selection and composite underrun statistics.
+
+### Fixed
+
+- Use the Pico SDK default-descriptor TinyUSB linkage consistently instead of
+  simultaneously requesting the application-descriptor library variant.
+
 ## [0.4.0] - 2026-08-12
 
 ### Added

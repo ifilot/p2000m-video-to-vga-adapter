@@ -10,12 +10,13 @@ SPDX-License-Identifier: CC-BY-4.0
 ![Philips P2000M connected to a monitor through the VID2VGA adapter](images/p2000m-vga-hero.jpg)
 
 This repository contains the adapter PCB and Raspberry Pi Pico 2 firmware for
-converting the Philips P2000M raw monochrome video output to VGA.
+converting the Philips P2000M raw monochrome video output simultaneously to VGA
+and PAL-compatible monochrome 625/50 composite video.
 
 The adapter captures the conditioned P2000M signals on GPIO16-18,
-recovers the source dot grid in software, and presents a tear-free 640 x 288
-source image in a 640 x 480, 60 Hz VGA raster. The asynchronous 50.095 Hz
-source is repeated as needed at VGA frame boundaries.
+recovers the source dot grid in software, and presents the same tear-free
+640 x 288 source image on a 640 x 480, 60 Hz VGA raster and a true-interlaced
+625-line, 50-field/s composite raster. VGA and composite are active together.
 
 By default, the 288 source lines are displayed one-to-one between 96-line top
 and bottom margins. An optional fit mode expands them to all 480 VGA lines using
@@ -38,6 +39,29 @@ to a standard VGA connection.
 
 *Circuit schematic. Select the image to open the PDF; the editable source is
 [`pcb/p2000m-to-vga-adapter.kicad_sch`](pcb/p2000m-to-vga-adapter.kicad_sch).*
+
+### Composite output wiring
+
+The monochrome composite resistor DAC uses GPIO14 and GPIO15. The three
+GPIO14 resistors are **in series**, not parallel:
+
+```text
+GPIO14 (pin 19) -- 220R -- 220R -- 220R --+
+                                              +-- RCA centre
+GPIO15 (pin 20) ----------- 220R ------------+
+GND    (pin 18) ------------------------------- RCA shield
+```
+
+The destination must terminate the signal with 75 ohms. The Philips BM7522
+does so internally; its [service manual](https://www.crt-mon.com/pdf/Philips/Philips-BM7522-Service-Manual.pdf)
+specifies a 75-ohm input impedance and a nominal 1 Vpp CVBS input. With that
+termination, the DAC produces
+approximately 0 V synchronization, 0.258 V black, and 1.03 V white. Do not add
+a second termination when using a normally terminated composite input.
+
+This is a monochrome signal with PAL-compatible 625/50 synchronization. It has
+no colour subcarrier or burst because the captured P2000M image and BM7522 are
+monochrome.
 
 ## Building
 
@@ -113,19 +137,20 @@ cmake --build build-gui
 See [`gui/README.md`](gui/README.md) for use and build instructions and
 [`gui/PACKAGING.md`](gui/PACKAGING.md) for CI packaging and tagged releases.
 
-## Video capture and VGA conversion
+## Video capture and simultaneous video conversion
 
 The P2000M connector does not carry a VGA-compatible raster. It exposes a
 one-bit monochrome `VIDEO` signal plus separate `HSYNC` and `VSYNC` timing
 signals. The adapter first converts those signals to safe 3.3 V logic, then the
-Pico measures and reconstructs the original dot grid before generating a new,
-independent VGA raster. The complete path is:
+Pico measures and reconstructs the original dot grid before generating two new,
+independent output rasters. The complete path is:
 
 ```text
 P2000M DIN-5 -> protection and Schmitt-trigger conditioning
              -> PIO sampling and DMA raw-frame buffers
              -> 640 x 288 one-bit reconstructed frames
-             -> color mapping and 640 x 480 VGA scanout
+             +-> color mapping and 640 x 480 VGA scanout on GPIO0-13
+             +-> monochrome 625/50 composite scanout on GPIO14-15
 ```
 
 ### P2000M source timing
@@ -198,8 +223,8 @@ interpolation pixels. A double-buffered map ensures that a timing adjustment
 cannot change partway through decoding a frame.
 
 Core 0 converts the newest completed raw capture into a packed 640 x 288 one-bit
-frame. Three decoded-frame buffers separate this work from VGA generation on
-core 1.
+frame. Three decoded-frame buffers separate this work from the independent VGA,
+PAL, and USB consumers on core 1.
 
 ### VGA presentation
 
@@ -235,6 +260,26 @@ bits each of red, green, and blue through the resistor DAC, while GPIO12 and
 GPIO13 generate VGA synchronization. After every 640-pixel picture line, the
 scanout emits black before horizontal blanking so the analog RGB outputs return
 to a defined level before synchronization.
+
+### Monochrome 625/50 presentation
+
+PIO1 emits composite samples at exactly 14 MHz (`252 MHz / 18`). Each 64 us
+line contains 896 two-bit samples. Two chained DMA channels alternate between
+two pairs of 224-byte scanline buffers, while core 1 prepares each completed pair
+alongside VGA scanline generation. The implementation therefore does not store
+the 140 kB full-frame waveform used by the standalone timing test.
+
+The output is a continuous true-interlaced 625-line frame. Field 2 starts
+exactly half a line after line 312, and both fields use the full equalising,
+broad-sync, and post-equalising pulse sequence. PAL lines 23-310 and 336-623
+each carry all 288 source rows. A new immutable decoded frame is selected only
+at a field boundary; absent source frames are repeated, and signal loss produces
+black composite video while synchronization continues.
+
+The 640 source pixels are emitted one-to-one and centred in the 728-sample
+picture interval. VGA-only colour, border, scaling, and phosphor-grain settings
+do not alter the monochrome composite pixels. A settings save briefly pauses
+and restarts composite output around the flash operation.
 
 ## USB controls
 

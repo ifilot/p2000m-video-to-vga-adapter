@@ -19,6 +19,7 @@
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include "hardware/vreg.h"
+#include "pal_output.h"
 #include "p2000m_capture.h"
 #include "p2000m_packbits.h"
 #include "p2000m_phosphor_noise.h"
@@ -170,10 +171,8 @@ typedef enum {
     DECODED_FREE,
     /** Core 0 is currently writing the buffer. */
     DECODED_FILLING,
-    /** Buffer contains a complete frame waiting for VGA presentation. */
+    /** Buffer contains a complete immutable frame available to consumers. */
     DECODED_READY,
-    /** Core 1 is currently presenting the buffer. */
-    DECODED_IN_USE,
 } decoded_buffer_state_t;
 
 /** Mutually exclusive interaction modes for the USB serial terminal. */
@@ -321,7 +320,7 @@ static const color_preset_t color_presets[] = {
     {.name = "gray",    .rgb = 0x808080u},
 };
 
-/** Three decoded frames shared between the capture and VGA cores. */
+/** Three decoded frames shared by capture, USB, VGA, and PAL output. */
 static uint32_t decoded_frames[DECODED_BUFFER_COUNT][DECODED_WORDS_PER_FRAME];
 /** Ownership state for each entry in decoded_frames. */
 static decoded_buffer_state_t decoded_states[DECODED_BUFFER_COUNT];
@@ -331,6 +330,10 @@ static uint32_t decoded_sequences[DECODED_BUFFER_COUNT];
 static spin_lock_t *decoded_lock;
 /** Whether the USB transmitter currently holds each decoded buffer immutable. */
 static bool decoded_usb_holds[DECODED_BUFFER_COUNT];
+/** Whether VGA currently needs each complete decoded buffer to stay immutable. */
+static bool decoded_vga_holds[DECODED_BUFFER_COUNT];
+/** Whether PAL currently needs each complete decoded buffer to stay immutable. */
+static bool decoded_pal_holds[DECODED_BUFFER_COUNT];
 
 /** Double-buffered byte-to-eight-pixel lookup tables for arbitrary colors. */
 static uint16_t monochrome_pixels[DISPLAY_STYLE_COUNT][256][8];
@@ -349,6 +352,15 @@ static int displayed_buffer = -1;
 static uint32_t displayed_sequence;
 /** Input-lock state sampled by core 1 at the current VGA frame boundary. */
 static bool displayed_signal_present;
+
+/** Decoded buffer currently presented on PAL, or -1 before the first field. */
+static int pal_displayed_buffer = -1;
+/** Source capture sequence currently presented on PAL. */
+static uint32_t pal_displayed_sequence;
+/** Requested PAL pause state, written by core 0 before flash mutation. */
+static volatile bool pal_pause_requested;
+/** PAL pause state acknowledged by the core-1 output loop. */
+static volatile bool pal_pause_applied;
 
 /** Lifetime VGA frame counter, written by core 1. */
 static volatile uint32_t generated_vga_frames;
@@ -743,17 +755,17 @@ static void initialize_decoded_buffers(void) {
         decoded_states[i] = DECODED_FREE;
         decoded_sequences[i] = 0;
         decoded_usb_holds[i] = false;
+        decoded_vga_holds[i] = false;
+        decoded_pal_holds[i] = false;
     }
 }
 
 /**
  * @brief Claim the newest eligible decoded frame for immutable USB reading.
  *
- * READY frames remain available to VGA after USB claims them. The currently
- * displayed IN_USE frame is also eligible, allowing both consumers to hold the
- * same immutable storage. Sequence filtering limits a responsive host to every
- * second decoded source frame while still letting a slow host take the newest
- * available image.
+ * READY frames may be held independently by VGA, PAL, and USB. Sequence
+ * filtering limits a responsive host to every second decoded source frame
+ * while still letting a slow host take the newest available image.
  *
  * @param sequence Receives the claimed source sequence number.
  * @return Buffer index, or -1 when no eligible complete frame exists.
@@ -764,9 +776,7 @@ static int acquire_decoded_frame_for_usb(uint32_t *sequence) {
     uint32_t latest_sequence = 0;
 
     for (unsigned i = 0; i < DECODED_BUFFER_COUNT; ++i) {
-        const bool complete = decoded_states[i] == DECODED_READY ||
-                              decoded_states[i] == DECODED_IN_USE;
-        if (complete && !decoded_usb_holds[i] &&
+        if (decoded_states[i] == DECODED_READY && !decoded_usb_holds[i] &&
             (latest < 0 || decoded_sequences[i] >= latest_sequence)) {
             latest = (int)i;
             latest_sequence = decoded_sequences[i];
@@ -817,7 +827,9 @@ static bool decode_latest_source_frame(void) {
     const uint32_t saved = spin_lock_blocking(decoded_lock);
     int decoded_index = -1;
     for (unsigned i = 0; i < DECODED_BUFFER_COUNT; ++i) {
-        if (decoded_states[i] == DECODED_FREE && !decoded_usb_holds[i]) {
+        const bool held = decoded_usb_holds[i] || decoded_vga_holds[i] ||
+                          decoded_pal_holds[i];
+        if (decoded_states[i] == DECODED_FREE && !held) {
             decoded_index = (int)i;
             break;
         }
@@ -825,8 +837,10 @@ static bool decode_latest_source_frame(void) {
     if (decoded_index < 0) {
         uint32_t oldest_sequence = UINT32_MAX;
         for (unsigned i = 0; i < DECODED_BUFFER_COUNT; ++i) {
+            const bool held = decoded_usb_holds[i] || decoded_vga_holds[i] ||
+                              decoded_pal_holds[i];
             if (decoded_states[i] == DECODED_READY &&
-                !decoded_usb_holds[i] &&
+                !held &&
                 decoded_sequences[i] < oldest_sequence) {
                 decoded_index = (int)i;
                 oldest_sequence = decoded_sequences[i];
@@ -861,7 +875,7 @@ static bool decode_latest_source_frame(void) {
 
         // Frame decoding can occupy core 0 for long enough to starve a USB
         // stream. Refill the asynchronously drained CDC FIFO at bounded
-        // intervals without changing the decoder or VGA buffer ownership.
+        // intervals without changing decoder or display-buffer ownership.
         if (usb_interface_mode == USB_SCREEN_MODE && (y & 7u) == 7u) {
             service_screen_output();
         }
@@ -896,10 +910,22 @@ static void select_frame_for_next_vga_frame(void) {
     ++generated_vga_frames;
 
     const uint32_t saved = spin_lock_blocking(decoded_lock);
+    if (!displayed_signal_present) {
+        if (displayed_buffer >= 0) {
+            decoded_vga_holds[displayed_buffer] = false;
+            displayed_buffer = -1;
+        }
+        ++blank_vga_frames;
+        spin_unlock(decoded_lock, saved);
+        return;
+    }
+
     int next = -1;
     uint32_t sequence = 0;
     for (unsigned i = 0; i < DECODED_BUFFER_COUNT; ++i) {
-        if (decoded_states[i] == DECODED_READY &&
+        const bool newer = displayed_buffer < 0 ||
+            (int32_t)(decoded_sequences[i] - displayed_sequence) > 0;
+        if (decoded_states[i] == DECODED_READY && newer &&
             (next < 0 || decoded_sequences[i] >= sequence)) {
             next = (int)i;
             sequence = decoded_sequences[i];
@@ -919,13 +945,65 @@ static void select_frame_for_next_vga_frame(void) {
     const int previous = displayed_buffer;
     displayed_buffer = next;
     displayed_sequence = sequence;
-    decoded_states[next] = DECODED_IN_USE;
+    decoded_vga_holds[next] = true;
     ++source_frame_swaps;
 
-    if (previous >= 0) {
-        decoded_states[previous] = DECODED_FREE;
+    if (previous >= 0 && previous != next) {
+        decoded_vga_holds[previous] = false;
     }
     spin_unlock(decoded_lock, saved);
+}
+
+/**
+ * @brief Select and retain the newest decoded source for one PAL field.
+ *
+ * PAL calls this only after the preceding field's final active scanline has
+ * completed. VGA and USB may independently retain the same buffer.
+ */
+static const uint32_t *select_frame_for_next_pal_field(unsigned field,
+                                                       uint32_t *sequence) {
+    (void)field;
+    const bool signal_present = p2000m_capture_signal_present();
+    const uint32_t saved = spin_lock_blocking(decoded_lock);
+
+    if (!signal_present) {
+        if (pal_displayed_buffer >= 0) {
+            decoded_pal_holds[pal_displayed_buffer] = false;
+            pal_displayed_buffer = -1;
+        }
+        *sequence = pal_displayed_sequence;
+        spin_unlock(decoded_lock, saved);
+        return NULL;
+    }
+
+    int next = -1;
+    uint32_t next_sequence = 0u;
+    for (unsigned i = 0; i < DECODED_BUFFER_COUNT; ++i) {
+        const bool newer = pal_displayed_buffer < 0 ||
+            (int32_t)(decoded_sequences[i] - pal_displayed_sequence) > 0;
+        if (decoded_states[i] == DECODED_READY && newer &&
+            (next < 0 || decoded_sequences[i] >= next_sequence)) {
+            next = (int)i;
+            next_sequence = decoded_sequences[i];
+        }
+    }
+
+    if (next >= 0) {
+        const int previous = pal_displayed_buffer;
+        pal_displayed_buffer = next;
+        pal_displayed_sequence = next_sequence;
+        decoded_pal_holds[next] = true;
+        if (previous >= 0 && previous != next) {
+            decoded_pal_holds[previous] = false;
+        }
+    }
+
+    *sequence = pal_displayed_sequence;
+    const uint32_t *frame = pal_displayed_buffer >= 0
+        ? decoded_frames[pal_displayed_buffer]
+        : NULL;
+    spin_unlock(decoded_lock, saved);
+    return frame;
 }
 
 /**
@@ -1339,23 +1417,46 @@ static void __not_in_flash_func(render_scanline)(
 }
 
 /**
- * @brief Run the deadline-critical VGA scanline producer on Pico core 1.
+ * @brief Apply a pending PAL pause/resume request on its owning core.
+ */
+static void service_pal_pause_request(void) {
+    const bool requested =
+        __atomic_load_n(&pal_pause_requested, __ATOMIC_ACQUIRE);
+    const bool applied = __atomic_load_n(&pal_pause_applied, __ATOMIC_RELAXED);
+    if (requested == applied) {
+        return;
+    }
+    if (requested) {
+        pal_output_stop();
+    } else {
+        pal_output_start();
+    }
+    __atomic_store_n(&pal_pause_applied, requested, __ATOMIC_RELEASE);
+}
+
+/**
+ * @brief Run the deadline-critical VGA and PAL producers on Pico core 1.
  *
  * @return Does not return.
  */
 static void __not_in_flash_func(vga_core_main)(void) {
-    // Setup and timing IRQ ownership stay on core 0, matching the proven VGA
-    // diagnostic. Core 1 is dedicated only to preparing scanline buffers.
+    // Scanvideo setup and timing IRQ ownership stay on core 0. Core 1 prepares
+    // both VGA scanlines and the lower-rate PAL DMA ping-pong buffers.
     if (!flash_safe_execute_core_init()) {
         panic("Unable to initialize core 1 flash lockout");
     }
+    pal_output_initialize(select_frame_for_next_pal_field);
+    pal_output_start();
     multicore_fifo_push_blocking(VGA_READY_MAGIC);
 
     while (true) {
+        service_pal_pause_request();
+        pal_output_service();
         scanvideo_scanline_buffer_t *scanline_buffer =
             scanvideo_begin_scanline_generation(true);
         render_scanline(scanline_buffer);
         scanvideo_end_scanline_generation(scanline_buffer);
+        pal_output_service();
     }
 }
 
@@ -1367,6 +1468,8 @@ static void __not_in_flash_func(vga_core_main)(void) {
 static void print_statistics(void) {
     p2000m_capture_stats_t capture;
     p2000m_capture_get_stats(&capture);
+    pal_output_stats_t pal;
+    pal_output_get_stats(&pal);
 
     const uint32_t vga_frames =
         __atomic_load_n(&generated_vga_frames, __ATOMIC_RELAXED);
@@ -1398,6 +1501,15 @@ static void print_statistics(void) {
            screen_last_prepare_us, screen_maximum_prepare_us,
            screen_last_encode_us, screen_maximum_encode_us,
            screen_last_tx_us, screen_maximum_tx_us);
+
+    printf("VID2PAL standard=625/50 sample_rate_hz=14000000 running=%s "
+           "fields=%" PRIu32 " swaps=%" PRIu32 " repeats=%" PRIu32
+           " blank=%" PRIu32 " underruns=%" PRIu32 " pauses=%" PRIu32
+           " displayed_sequence=%" PRIu32 " output_line=%u\n",
+           pal.running ? "yes" : "no", pal.generated_fields,
+           pal.source_frame_swaps, pal.repeated_fields, pal.blank_fields,
+           pal.dma_underruns, pal.pause_count, pal.displayed_sequence,
+           (unsigned)pal.output_line);
 
     if (capture.last_frame_period_us == 0) {
         printf("VID2VGA capture_frames=%" PRIu32
@@ -1959,6 +2071,37 @@ static void __not_in_flash_func(perform_settings_flash_mutation)(
     }
 }
 
+/** Wait for core 1 to acknowledge a requested PAL run state. */
+static bool request_pal_pause(bool paused) {
+    __atomic_store_n(&pal_pause_requested, paused, __ATOMIC_RELEASE);
+    const uint64_t deadline =
+        time_us_64() + (uint64_t)FLASH_LOCKOUT_TIMEOUT_MS * 1000u;
+    while (__atomic_load_n(&pal_pause_applied, __ATOMIC_ACQUIRE) != paused) {
+        if (time_us_64() >= deadline) {
+            return false;
+        }
+        tight_loop_contents();
+    }
+    return true;
+}
+
+/** Pause PAL before a flash lockout and resume it after the mutation. */
+static int execute_settings_flash_mutation(flash_mutation_t *mutation) {
+    if (!request_pal_pause(true)) {
+        (void)request_pal_pause(false);
+        return PICO_ERROR_TIMEOUT;
+    }
+
+    const int result = flash_safe_execute(perform_settings_flash_mutation,
+                                          mutation,
+                                          FLASH_LOCKOUT_TIMEOUT_MS);
+
+    if (!request_pal_pause(false)) {
+        return PICO_ERROR_TIMEOUT;
+    }
+    return result;
+}
+
 /**
  * @brief Persist display settings and manual phase trim to the inactive slot.
  *
@@ -2009,9 +2152,7 @@ static int save_current_configuration(void) {
     mutation.program_page = true;
     memcpy(mutation.page, &record, sizeof(record));
 
-    const int result = flash_safe_execute(perform_settings_flash_mutation,
-                                          &mutation,
-                                          FLASH_LOCKOUT_TIMEOUT_MS);
+    const int result = execute_settings_flash_mutation(&mutation);
     if (result != PICO_OK) {
         return result;
     }
@@ -2041,9 +2182,7 @@ static int erase_saved_configuration(void) {
     mutation.erase_size = SETTINGS_SLOT_COUNT * FLASH_SECTOR_SIZE;
     mutation.program_page = false;
 
-    const int result = flash_safe_execute(perform_settings_flash_mutation,
-                                          &mutation,
-                                          FLASH_LOCKOUT_TIMEOUT_MS);
+    const int result = execute_settings_flash_mutation(&mutation);
     if (result == PICO_OK) {
         saved_settings_slot = -1;
         saved_settings_sequence = 0u;
@@ -2394,7 +2533,7 @@ static void process_usb_command(char *command) {
         publish_display_style(&defaults);
         print_display_settings();
     } else if (strcmp(command, "save") == 0) {
-        printf("Saving settings to flash; VGA may blink briefly...\n");
+        printf("Saving settings to flash; VGA and PAL may blink briefly...\n");
         const int result = save_current_configuration();
         if (result == PICO_OK) {
             printf("Settings saved redundantly (sequence=%" PRIu32 ").\n",
@@ -2405,7 +2544,7 @@ static void process_usb_command(char *command) {
         }
     } else if (strcmp(command, "factory-reset") == 0 ||
                strcmp(command, "factory_reset") == 0) {
-        printf("Erasing saved settings; VGA may blink briefly...\n");
+        printf("Erasing saved settings; VGA and PAL may blink briefly...\n");
         const int result = erase_saved_configuration();
         if (result == PICO_OK) {
             const display_style_t defaults = default_display_style();
@@ -2619,8 +2758,8 @@ int main(void) {
             usb_command_overflow = false;
             usb_ignore_next_lf = false;
             // Keep converting at the input frame rate even without a USB host.
-            // Triple buffering ensures VGA always retains a complete READY
-            // frame while core 0 prepares the next one.
+            // Triple buffering lets both display consumers retain complete
+            // frames while core 0 prepares another whenever space is free.
             sleep_ms(1);
             continue;
         }
@@ -2628,7 +2767,8 @@ int main(void) {
         if (!announced) {
             sleep_ms(100);
             printf("P2000M VID2VGA firmware %s ready: 640x288 source to "
-                   "640x480 VGA.\n", firmware_version);
+                   "640x480 VGA and monochrome 625/50 composite.\n",
+                   firmware_version);
             print_firmware_license();
             print_display_settings();
             printf("Enter HELP for available commands.\n");
