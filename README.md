@@ -29,15 +29,27 @@ The adapter conditions the P2000M video and synchronization signals for the
 Pico 2, then converts the Pico's 12-bit RGB output and synchronization signals
 to a standard VGA connection.
 
-[![3D rendering of the assembled P2000M VID2VGA adapter PCB](images/p2000m-to-vga-adapter.png)](images/p2000m-to-vga-adapter.png)
+[![Assembled P2000M VID2VGA adapter PCB with connected cables](images/p2000m-vga-pcb.jpg)](images/p2000m-vga-pcb.jpg)
 
-*3D rendering of the assembled adapter. The board design is in
+*Assembled adapter PCB. The board design is in
 [`pcb/p2000m-to-vga-adapter.kicad_pcb`](pcb/p2000m-to-vga-adapter.kicad_pcb).*
 
 [![Circuit schematic for the P2000M VID2VGA adapter](images/p2000m-to-vga-adapter-schematic.png)](pcb/p2000m-to-vga-adapter.pdf)
 
 *Circuit schematic. Select the image to open the PDF; the editable source is
 [`pcb/p2000m-to-vga-adapter.kicad_sch`](pcb/p2000m-to-vga-adapter.kicad_sch).*
+
+### Enclosure
+
+A two-part 3D-printable enclosure protects the assembled adapter while keeping
+its connectors, USB port, and controls accessible. Ready-to-print models are
+available as [`enclosure/v1/top.stl`](enclosure/v1/top.stl) and
+[`enclosure/v1/bottom.stl`](enclosure/v1/bottom.stl).
+
+<p align="center">
+  <a href="images/p2000m-vga-enclosure.jpg"><img src="images/p2000m-vga-enclosure.jpg" alt="P2000M VID2VGA adapter fitted in its enclosure" width="49%"></a>
+  <a href="images/p2000m-vga-enclosure-connected.jpg"><img src="images/p2000m-vga-enclosure-connected.jpg" alt="Enclosed P2000M VID2VGA adapter with cables connected" width="49%"></a>
+</p>
 
 ## Building
 
@@ -88,6 +100,8 @@ build/src/p2000m-vid2vga-firmware.uf2
 > in-spec operating condition.
 
 ### Desktop screen viewer
+
+[![P2000M desktop screen viewer running on a laptop](images/p2000m-vga-desktop-viewer.jpg)](images/p2000m-vga-desktop-viewer.jpg)
 
 The `gui` directory contains a Qt 6 application for Windows, Linux, and macOS.
 It automatically finds Raspberry Pi Pico CDC ports, verifies the VID2VGA
