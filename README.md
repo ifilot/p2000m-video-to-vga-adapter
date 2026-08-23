@@ -1,9 +1,4 @@
-<!--
-SPDX-FileCopyrightText: 2026 Ivo Filot <ivo@ivofilot.nl>
-SPDX-License-Identifier: CC-BY-4.0
--->
-
-# P2000M VID2VGA adapter
+# Philips P2000M video to VGA adapter
 
 [![Firmware](https://github.com/ifilot/p2000m-video-to-vga-adapter/actions/workflows/firmware.yml/badge.svg)](https://github.com/ifilot/p2000m-video-to-vga-adapter/actions/workflows/firmware.yml)
 
