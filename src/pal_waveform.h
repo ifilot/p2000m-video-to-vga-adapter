@@ -6,6 +6,7 @@
 #ifndef PAL_WAVEFORM_H
 #define PAL_WAVEFORM_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 enum {
@@ -23,10 +24,11 @@ enum {
     PAL_PICTURE_START = 147,
     PAL_PICTURE_END = 875,
     PAL_SOURCE_FIRST_SAMPLE = PAL_PICTURE_START + 44,
-    PAL_FIELD1_FIRST_LINE = 23,
-    PAL_FIELD1_LAST_LINE = 310,
-    PAL_FIELD2_FIRST_LINE = 336,
-    PAL_FIELD2_LAST_LINE = 623,
+    /** One line later than the original layout; retain all 288 source rows. */
+    PAL_FIELD1_FIRST_LINE = 24,
+    PAL_FIELD1_LAST_LINE = 311,
+    PAL_FIELD2_FIRST_LINE = 337,
+    PAL_FIELD2_LAST_LINE = 624,
     /** Signal-loss card geometry in 640 x 288 source coordinates. */
     PAL_SIGNAL_LOST_PANEL_LEFT = 90,
     PAL_SIGNAL_LOST_PANEL_RIGHT = 550,
@@ -55,6 +57,17 @@ extern "C" {
  */
 void pal_waveform_build_line(uint32_t words[PAL_WORDS_PER_LINE], unsigned line,
                              const uint32_t *decoded_frame);
+
+/** Diagnostic variant: false delay_picture restores the original position. */
+void pal_waveform_build_line_configured(
+    uint32_t words[PAL_WORDS_PER_LINE], unsigned line,
+    const uint32_t *decoded_frame, bool delay_picture, bool test_pattern);
+
+/** Diagnostic sync advance (0..7 half-lines); 6/7 force original picture position. */
+void pal_waveform_build_line_timed(
+    uint32_t words[PAL_WORDS_PER_LINE], unsigned line,
+    const uint32_t *decoded_frame, bool delay_picture, bool test_pattern,
+    unsigned sync_advance);
 
 #ifdef __cplusplus
 }

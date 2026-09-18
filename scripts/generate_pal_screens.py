@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Generate native 640x288 one-bit PAL artwork. Requires Pillow.
+
+The firmware consumes the packed MSB-first words directly, without scaling.
+PNG previews stretch only the display aspect ratio, using nearest neighbour.
+"""
+from pathlib import Path
+import math
+import re
+from PIL import Image, ImageDraw
+
+ROOT = Path(__file__).resolve().parents[1]
+OUT = ROOT / 'docs/pal-screens'
+FONT = re.findall(r'\{((?:0x[0-9a-f]+u,?\s*){7})\}',
+                  (ROOT / 'src/p2000m_signal_loss.c').read_text())[:36]
+GLYPHS = {c: [int(v, 16) for v in re.findall(r'0x([0-9a-f]+)', row)]
+          for c, row in zip('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', FONT)}
+assert len(GLYPHS) == 36
+
+
+def text(x, y, label, scale=1):
+    for c in label:
+        for j, row in enumerate(GLYPHS.get(c, [0]*7)):
+            for i in range(5):
+                if row & (16 >> i):
+                    d.rectangle((x+i*scale, y+j*scale,
+                                 x+(i+1)*scale-1, y+(j+1)*scale-1), fill=1)
+        x += 6*scale
+
+
+def line(points, width=2):
+    d.line(points, fill=1, width=width)
+
+
+def box(x, y, w, h):
+    d.rectangle((x, y, x+w, y+h), outline=1, width=2)
+
+
+def base(index, title, subtitle):
+    global im, d
+    im = Image.new('1', (640, 288))
+    d = ImageDraw.Draw(im)
+    # Inset corners tolerate modest CRT overscan without resizing content.
+    for x, sx in [(16, 1), (623, -1)]:
+        for y, sy in [(12, 1), (275, -1)]:
+            line([(x, y+sy*12), (x, y), (x+sx*28, y)])
+    text(32, 23, title, 2)
+    text(450, 25, 'P2000M  LAB  '+index)
+    line([(32, 46), (607, 46)])
+    text(32, 55, subtitle)
+    line([(32, 252), (607, 252)])
+    text(32, 264, 'MONOCHROME  640 X 288')
+    text(390, 264, 'STATIC DEMO   PAL 625 50')
+
+
+frames = []
+
+def finish(name):
+    OUT.mkdir(parents=True, exist_ok=True)
+    im.save(OUT / (name+'.png'))
+    preview = Image.new('RGB', im.size, '#080604')
+    preview.paste('#ffb238', mask=im.convert('L'))
+    preview.resize((960, 720), Image.Resampling.NEAREST).save(OUT / (name+'-amber.png'))
+    data = im.tobytes()
+    assert len(data) == 640*288//8
+    frames.append((name, [int.from_bytes(data[i:i+4], 'big') for i in range(0, len(data), 4)]))
+
+
+base('01', 'DEEP FIELD', 'PASSIVE ARRAY   SECTOR 07   SEARCH MODE')
+# Elliptical source circles become circular on a 4:3 CRT.
+cx, cy = 192, 158
+for rx in [30, 60, 90, 120]:
+    ry = rx*0.6
+    d.ellipse((cx-rx, cy-ry, cx+rx, cy+ry), outline=1, width=2)
+line([(65, cy), (319, cy)])
+line([(cx, 80), (cx, 236)])
+for angle in range(0, 360, 30):
+    a = math.radians(angle)
+    line([(cx+124*math.cos(a), cy+74*math.sin(a)),
+          (cx+131*math.cos(a), cy+79*math.sin(a))])
+for angle in [310, 318, 326]:
+    a = math.radians(angle)
+    line([(cx, cy), (cx+118*math.cos(a), cy+71*math.sin(a))])
+for x, y in [(147,125),(240,112),(265,184)]:
+    box(x-4,y-3,8,6)
+    line([(x-9,y),(x-6,y)])
+text(337, 85, 'SIGNAL LOST', 3)
+text(339, 116, 'AWAITING SOURCE SYNC')
+for n, label in enumerate(['01  HSYNC   SEARCH', '02  VSYNC   SEARCH', '03  VIDEO   STANDBY']):
+    y = 142+n*23
+    box(338, y-5, 266, 19)
+    text(350, y, label)
+text(339, 219, 'LISTENING BEYOND THE NOISE')
+finish('radar')
+
+base('02', 'LOGIC CORE', 'BUS TOPOLOGY   VIDEO INTERFACE   REV 06')
+# A chip and routed copper, translated into crisp luminous outlines.
+box(245, 94, 150, 130)
+box(254, 100, 132, 118)
+text(271, 120, 'P2000M', 2)
+text(277, 151, 'VIDEO', 2)
+text(272, 181, 'CORE  01')
+d.ellipse((263, 106, 269, 110), fill=1)
+for n in range(7):
+    y = 104+n*17
+    for left in [True, False]:
+        x = 245 if left else 395
+        sign = -1 if left else 1
+        end = 54+n*19 if left else 586-n*19
+        bend = x+sign*(25+n*4)
+        dy = (-1 if n%2 else 1)*9
+        line([(x,y),(bend,y),(bend+sign*15,y+dy),(end,y+dy)])
+        d.ellipse((end-4,y+dy-3,end+4,y+dy+3), outline=1, width=2)
+text(49, 79, 'INPUT BUS')
+text(475, 79, 'OUTPUT BUS')
+text(53, 232, 'CAPTURE')
+text(267, 232, 'LINK IDLE')
+text(486, 232, 'COMPOSITE')
+finish('circuit')
+
+base('03', 'SIGNAL ATLAS', 'TIMING LAB   COMPOSITE WAVEFORM STUDY')
+box(32, 80, 382, 155)
+for x in range(48, 408, 24):
+    for y in range(90, 232, 12):
+        d.rectangle((x,y,x+1,y+1),fill=1)
+text(47, 91, 'A   LINE SYNC')
+pts=[]
+for start in [48, 138, 228, 318]:
+    pts += [(start,124),(start+13,124),(start+13,144),(start+24,144),
+            (start+24,124),(start+37,124),(start+37,114),(start+72,114),
+            (start+72,124),(start+88,124)]
+line(pts)
+text(47, 163, 'B   VIDEO ENVELOPE')
+line([(x, 207-round(14*math.sin(x/13)*math.sin(x/47))) for x in range(48,400)])
+text(438, 87, '625', 4)
+text(439, 123, 'LINES PER FRAME')
+text(438, 145, '50', 4)
+text(439, 181, 'FIELDS PER SECOND')
+line([(438,200),(599,200)])
+text(439, 212, 'ILLUSTRATIVE TRACES')
+text(439, 226, 'NO LIVE MEASUREMENT')
+finish('scope')
+
+header = '''/* Generated by scripts/generate_pal_screens.py; do not edit. */
+#ifndef PAL_DEMO_SCREENS_H
+#define PAL_DEMO_SCREENS_H
+#include <stdint.h>
+/* MSB-first 640x288 monochrome pixels; flash resident. */
+'''
+for name, words in frames:
+    header += f'static const uint32_t pal_demo_{name}[5760] = {{\n'
+    for i in range(0,len(words),8):
+        header += '    '+', '.join(f'0x{w:08x}u' for w in words[i:i+8])+',\n'
+    header += '};\n'
+header += '#endif\n'
+(ROOT / 'src/pal_demo_screens.h').write_text(header)

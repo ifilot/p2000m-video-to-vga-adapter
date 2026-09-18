@@ -26,9 +26,9 @@ typedef struct {
  * Select the immutable decoded source frame for an upcoming PAL field.
  *
  * The callback is made on core 1 after the preceding field's final active line
- * has completed. It may retain the preceding pointer when no newer frame is
- * available. A null result produces a monochrome signal-loss card while PAL
- * synchronization continues.
+ * has been copied into a DMA buffer. It may retain the pointer when no newer
+ * frame is available. A null result produces a monochrome signal-loss card
+ * while PAL synchronization continues.
  */
 typedef const uint32_t *(*pal_output_frame_provider_t)(unsigned field,
                                                        uint32_t *sequence);
@@ -48,4 +48,15 @@ void pal_output_stop(void);
 /** Copy a coherent snapshot of the output counters. */
 void pal_output_get_stats(pal_output_stats_t *stats);
 
+/** Runtime options, adopted together at the next frame boundary.
+ * Firmware save/load persists timing and artwork; the test pattern remains temporary. */
+/** Persistable PAL signal-loss artwork: 0 live, 1 radar, 2 circuit, 3 scope. */
+void pal_output_set_demo(unsigned screen);
+unsigned pal_output_demo(void);
+void pal_output_set_test_pattern(bool enabled);
+bool pal_output_test_pattern_enabled(void);
+void pal_output_set_picture_delay(bool enabled);
+bool pal_output_picture_delay_enabled(void);
+void pal_output_set_sync_advance(unsigned half_lines);
+unsigned pal_output_sync_advance(void);
 #endif

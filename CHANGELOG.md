@@ -11,6 +11,36 @@ and releases use [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Three native 640×288 monochrome PAL demo screens: radar, circuit and scope,
+  selectable with `pal-demo off|radar|circuit|scope` independently of VGA.
+  Artwork is shown only on signal loss; live source video always takes priority.
+  The choice persists through `save` using version-six settings, with migration
+  preserving older display and composite timing preferences.
+
+## [0.6.0] - 2026-09-18
+
+### Added
+
+- Persistable `pal-sync 0|1|2|3|4|5|6|7` diagnostic modes to advance broad vertical sync
+  in half-line steps by shortening pre-equalisation, without resizing the image.
+  Nonzero modes are experimental; zero retains the normal five-pulse sequence.
+- The 3/3.5-line diagnostics wrap the sync sequence across the frame boundary and
+  enforce the original picture position to protect all 288 source rows.
+
+- A built-in composite test pattern with an edge outline, scanline rulers and
+  24 numbered text rows, controlled by `pal-test on|off` without a source input.
+- A persistable `pal-shift 0|1` control for comparing the original picture position
+  with a one-scanline (64 us) delay. The diagnostic default is one line later;
+  both positions preserve all 288 source rows and the existing sync waveform.
+- Full-frame waveform and source-row coverage tests for both picture positions.
+- Inset test-pattern guides at 2, 4, 8 and 12 scanlines from both vertical edges
+  to measure clipping, and 1200-baud USB bootloader entry for iterative uploads.
+- Version-five settings records retain composite sync/position through `save`,
+  preserve version-one through version-four preferences, and reject timing
+  combinations that overlap the last picture row. The test pattern stays temporary.
+
 ## [0.5.0] - 2026-08-14
 
 ### Added
@@ -213,7 +243,8 @@ and releases use [Semantic Versioning](https://semver.org/).
 - Pico 2/RP2350 project defaults and an early, actionable error when the Arm
   cross-compiler is not installed.
 
-[Unreleased]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/ifilot/p2000m-video-to-vga-adapter/compare/v0.3.1...v0.3.2

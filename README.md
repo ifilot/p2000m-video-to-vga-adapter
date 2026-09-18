@@ -272,7 +272,8 @@ the 140 kB full-frame waveform used by the standalone timing test.
 
 The output is a continuous true-interlaced 625-line frame. Field 2 starts
 exactly half a line after line 312, and both fields use the full equalising,
-broad-sync, and post-equalising pulse sequence. PAL lines 23-310 and 336-623
+broad-sync, and post-equalising pulse sequence. Zero-based waveform lines
+24-311 and 337-624
 each carry all 288 source rows. A new immutable decoded frame is selected only
 at a field boundary; absent source frames are repeated, and signal loss produces
 a centered monochrome `SIGNAL LOST` card while synchronization continues. The
@@ -284,6 +285,46 @@ picture interval. VGA-only colour, border, scaling, and phosphor-grain settings
 do not alter the monochrome composite pixels. A settings save briefly pauses
 an enabled composite output around the flash operation and preserves an output
 that was already disabled.
+
+The picture starts one scanline (64 us) later than the original layout to test
+top-row clipping on CRT monitors. All 288 source rows are retained one-to-one;
+there is no vertical scaling or added top/bottom border. This is a reversible
+positioning adjustment, not a claim that CRT compatibility has been verified.
+`pal-shift 0` restores the original lines 23-310 and 336-623; `pal-shift 1`
+selects the later position. The sync waveform is identical in both settings.
+
+For a monitor test without a P2000M connected, enter `pal-test on`. The built-in
+composite pattern has a one-pixel outline, alternating white/black scanline
+rulers at both sides, and 24 numbered text rows (`ROW 00` through `ROW 23`).
+Four inset horizontal guides sit 2, 4, 8 and 12 source scanlines from both the
+top and bottom borders. Their lengths decrease moving inward; compare which
+guides remain visible to estimate how many edge scanlines the monitor hides.
+Check the complete top and bottom outlines, character tops in row 00, and the
+bottom of row 23 while switching `pal-shift 0` / `pal-shift 1`. Keep the monitor
+controls unchanged during the comparison. `pal-test off` restores captured
+video or the signal-loss card. Timing changes take effect at a frame boundary.
+`save` persists `pal-shift` and `pal-sync` alongside the other settings; without
+a saved timing record the defaults are shift 1 and sync 0. The test pattern is
+temporary and always starts off after reboot.
+`status` reports `test`, `shift`, and DMA `underruns`. The capture-related PAL
+counters still describe the input frame provider while the test pattern runs.
+Opening the USB serial port at 1200 baud enters the Pico BOOTSEL bootloader for
+firmware uploads; use 115200 baud for normal console access.
+
+`pal-sync 0|1|2|3|4|5|6|7` selects a diagnostic advance of the broad vertical-sync
+pulses by 0, 0.5, 1, 1.5, 2, 2.5, 3 or 3.5 lines. Modes 1 through 5 shorten the pre-equalising
+sequence from five pulses down to zero (at 2.5 lines). These are experimental
+nonstandard sync sequences for testing monitor retrace response, not PAL
+compliance fixes. Five broad pulses and five post-equalising pulses remain;
+picture position, all 288 source rows and the 625-line frame period are retained.
+The mode changes at a frame boundary, is reported as `sync_advance_half_lines`
+in `status`. Use `save` to retain the selected mode across resets. `settings`
+reports the saved/modified state along with `pal_shift` and `pal_sync`.
+Modes 6 and 7 (3 and 3.5 lines) move the sequence another half/one line earlier,
+wrapping broad sync across the frame boundary. Each forces `pal-shift 0` and rejects
+`pal-shift 1` to prevent the last picture row from overlapping sync. All 288
+source rows remain visible in the generated waveform. Both modes use an
+experimental nonstandard sequence.
 
 ## USB controls
 

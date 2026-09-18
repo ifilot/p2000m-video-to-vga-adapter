@@ -33,6 +33,14 @@ _Static_assert(PAL_SAMPLES_PER_LINE % PAL_SAMPLES_PER_WORD == 0,
                "PAL scanlines must contain complete DMA words");
 _Static_assert(PAL_FIELD_SAMPLES == 280000,
                "Field 2 must begin exactly 312.5 lines after field 1");
+_Static_assert(PAL_FIELD1_LAST_LINE - PAL_FIELD1_FIRST_LINE + 1 ==
+                   P2000M_CAPTURE_HEIGHT &&
+               PAL_FIELD2_LAST_LINE - PAL_FIELD2_FIRST_LINE + 1 ==
+                   P2000M_CAPTURE_HEIGHT,
+               "Both fields must retain every source row without scaling");
+_Static_assert(PAL_FIELD1_LAST_LINE < 312 &&
+               PAL_FIELD2_LAST_LINE < PAL_LINES_PER_FRAME,
+               "Picture must finish before the next field sync sequence");
 
 /** Replace a local scanline range with one repeated two-bit PAL level. */
 static void PAL_TIME_CRITICAL_NOINLINE(fill_sample_range)(
@@ -66,16 +74,16 @@ static void PAL_TIME_CRITICAL_NOINLINE(fill_sample_range)(
 
 /** Fill the intersection of a frame-coordinate range and one scanline. */
 static void PAL_TIME_CRITICAL_NOINLINE(fill_frame_range)(
-    uint32_t *words, unsigned line, unsigned first, unsigned end,
+    uint32_t *words, unsigned line, int first, int end,
     enum pal_level level) {
-    const unsigned line_first = line * PAL_SAMPLES_PER_LINE;
-    const unsigned line_end = line_first + PAL_SAMPLES_PER_LINE;
+    const int line_first = (int)line * PAL_SAMPLES_PER_LINE;
+    const int line_end = line_first + PAL_SAMPLES_PER_LINE;
     if (end <= line_first || first >= line_end) {
         return;
     }
-    const unsigned local_first = first > line_first ? first - line_first : 0u;
+    const unsigned local_first = first > line_first ? (unsigned)(first - line_first) : 0u;
     const unsigned local_end = end < line_end
-                                   ? end - line_first
+                                   ? (unsigned)(end - line_first)
                                    : PAL_SAMPLES_PER_LINE;
     fill_sample_range(words, local_first, local_end, level);
 }
@@ -83,28 +91,30 @@ static void PAL_TIME_CRITICAL_NOINLINE(fill_frame_range)(
 /** Replace ordinary sync with one true-interlaced field-sync sequence. */
 static void PAL_TIME_CRITICAL_NOINLINE(add_field_sync)(uint32_t *words,
                                                        unsigned line,
-                                                       unsigned field_start) {
-    const unsigned interval_end =
-        field_start + 15u * PAL_HALF_LINE_SAMPLES;
-    const unsigned line_first = line * PAL_SAMPLES_PER_LINE;
-    const unsigned line_end = line_first + PAL_SAMPLES_PER_LINE;
+                                                       int field_start,
+                                                       unsigned advance) {
+    const unsigned pre_pulses = advance < 5u ? 5u - advance : 0u;
+    const int interval_end =
+        field_start + (int)(pre_pulses + 10u) * PAL_HALF_LINE_SAMPLES;
+    const int line_first = (int)line * PAL_SAMPLES_PER_LINE;
+    const int line_end = line_first + PAL_SAMPLES_PER_LINE;
     if (interval_end <= line_first || field_start >= line_end) {
         return;
     }
     fill_frame_range(words, line, field_start, interval_end, PAL_LEVEL_BLACK);
 
-    for (unsigned pulse = 0; pulse < 5u; ++pulse) {
-        const unsigned start = field_start + pulse * PAL_HALF_LINE_SAMPLES;
+    for (unsigned pulse = 0; pulse < pre_pulses; ++pulse) {
+        const int start = field_start + (int)pulse * PAL_HALF_LINE_SAMPLES;
         fill_frame_range(words, line, start, start + PAL_EQUALISING_SAMPLES,
                          PAL_LEVEL_SYNC);
     }
-    for (unsigned pulse = 5u; pulse < 10u; ++pulse) {
-        const unsigned start = field_start + pulse * PAL_HALF_LINE_SAMPLES;
+    for (unsigned pulse = pre_pulses; pulse < pre_pulses + 5u; ++pulse) {
+        const int start = field_start + (int)pulse * PAL_HALF_LINE_SAMPLES;
         fill_frame_range(words, line, start, start + PAL_BROAD_SYNC_SAMPLES,
                          PAL_LEVEL_SYNC);
     }
-    for (unsigned pulse = 10u; pulse < 15u; ++pulse) {
-        const unsigned start = field_start + pulse * PAL_HALF_LINE_SAMPLES;
+    for (unsigned pulse = pre_pulses + 5u; pulse < pre_pulses + 10u; ++pulse) {
+        const int start = field_start + (int)pulse * PAL_HALF_LINE_SAMPLES;
         fill_frame_range(words, line, start, start + PAL_EQUALISING_SAMPLES,
                          PAL_LEVEL_SYNC);
     }
@@ -234,22 +244,95 @@ static void PAL_TIME_CRITICAL_NOINLINE(draw_source_line)(
     }
 }
 
-void PAL_TIME_CRITICAL(pal_waveform_build_line)(
+/** Edge outline, scanline rulers and 24 numbered text rows, without a frame. */
+static void PAL_COLD_NOINLINE(draw_test_line)(uint32_t *words,
+                                             unsigned source_y) {
+    const unsigned left = PAL_SOURCE_FIRST_SAMPLE;
+    const unsigned right = left + P2000M_CAPTURE_WIDTH;
+    if (source_y == 0u || source_y == P2000M_CAPTURE_HEIGHT - 1u) {
+        fill_sample_range(words, left, right, PAL_LEVEL_WHITE);
+        return;
+    }
+    fill_sample_range(words, left, left + 1u, PAL_LEVEL_WHITE);
+    fill_sample_range(words, right - 1u, right, PAL_LEVEL_WHITE);
+    // Four inset guides at known distances from each edge distinguish a
+    // missing border from several missing picture lines. Mirror the guides
+    // at the bottom; keep them clear of the central text and side rulers.
+    const unsigned edge_distance = source_y < P2000M_CAPTURE_HEIGHT / 2u
+        ? source_y : P2000M_CAPTURE_HEIGHT - 1u - source_y;
+    if (edge_distance == 2u || edge_distance == 4u ||
+        edge_distance == 8u || edge_distance == 12u) {
+        const unsigned inset = 88u + edge_distance * 4u;
+        fill_sample_range(words, left + inset, left + 216u, PAL_LEVEL_WHITE);
+        fill_sample_range(words, right - 216u, right - inset, PAL_LEVEL_WHITE);
+    }
+    // Count individual white/black scanlines at either edge. Longer ticks
+    // delimit the 12-scanline character rows.
+    if (source_y % 2u == 0u) {
+        const unsigned width = source_y % 12u == 0u ? 64u : 32u;
+        fill_sample_range(words, left + 16u, left + 16u + width,
+                          PAL_LEVEL_WHITE);
+        fill_sample_range(words, right - 16u - width, right - 16u,
+                          PAL_LEVEL_WHITE);
+    }
+    const unsigned row = source_y / 12u;
+    char label[] = "ROW 00   HHHHH   XXXXX   00000";
+    label[4] = (char)('0' + row / 10u);
+    label[5] = (char)('0' + row % 10u);
+    draw_signal_lost_text(words, source_y, label, row * 12u + 2u, 1u);
+}
+
+void PAL_TIME_CRITICAL(pal_waveform_build_line_timed)(
     uint32_t words[PAL_WORDS_PER_LINE], unsigned line,
-    const uint32_t *decoded_frame) {
+    const uint32_t *decoded_frame, bool delay_picture, bool test_pattern,
+    unsigned sync_advance) {
+    if (sync_advance > 7u) {
+        sync_advance = 0u;
+    }
     for (unsigned word = 0; word < PAL_WORDS_PER_LINE; ++word) {
         words[word] = 0x55555555u;
     }
     fill_sample_range(words, 0u, PAL_HSYNC_SAMPLES, PAL_LEVEL_SYNC);
-    add_field_sync(words, line, 0u);
-    add_field_sync(words, line, PAL_FIELD_SAMPLES);
-
-    if (line >= PAL_FIELD1_FIRST_LINE && line <= PAL_FIELD1_LAST_LINE) {
-        draw_source_line(words, decoded_frame,
-                         line - PAL_FIELD1_FIRST_LINE);
-    } else if (line >= PAL_FIELD2_FIRST_LINE &&
-               line <= PAL_FIELD2_LAST_LINE) {
-        draw_source_line(words, decoded_frame,
-                         line - PAL_FIELD2_FIRST_LINE);
+    // The 3/3.5-line diagnostics move the pre-equaliser-free sequence
+    // half/one line across the frame boundary. Keep signed coordinates for its head
+    // and emit its wrapped tail at the end of this frame as well.
+    const int early = sync_advance > 5u
+        ? (int)(sync_advance - 5u) * PAL_HALF_LINE_SAMPLES : 0;
+    add_field_sync(words, line, -early, sync_advance);
+    add_field_sync(words, line, PAL_FIELD_SAMPLES - early, sync_advance);
+    if (early != 0) {
+        add_field_sync(words, line, PAL_FRAME_SAMPLES - early, sync_advance);
+        // The delayed final picture row would overlap this wrapped sync.
+        delay_picture = false;
     }
+
+    const unsigned advance = delay_picture ? 0u : 1u;
+    unsigned source_y;
+    if (line >= PAL_FIELD1_FIRST_LINE - advance &&
+        line <= PAL_FIELD1_LAST_LINE - advance) {
+        source_y = line - (PAL_FIELD1_FIRST_LINE - advance);
+    } else if (line >= PAL_FIELD2_FIRST_LINE - advance &&
+               line <= PAL_FIELD2_LAST_LINE - advance) {
+        source_y = line - (PAL_FIELD2_FIRST_LINE - advance);
+    } else {
+        return;
+    }
+    if (test_pattern) {
+        draw_test_line(words, source_y);
+    } else {
+        draw_source_line(words, decoded_frame, source_y);
+    }
+}
+
+void PAL_TIME_CRITICAL(pal_waveform_build_line_configured)(
+    uint32_t words[PAL_WORDS_PER_LINE], unsigned line,
+    const uint32_t *decoded_frame, bool delay_picture, bool test_pattern) {
+    pal_waveform_build_line_timed(words, line, decoded_frame, delay_picture,
+                                  test_pattern, 0u);
+}
+
+void PAL_TIME_CRITICAL(pal_waveform_build_line)(
+    uint32_t words[PAL_WORDS_PER_LINE], unsigned line,
+    const uint32_t *decoded_frame) {
+    pal_waveform_build_line_configured(words, line, decoded_frame, true, false);
 }

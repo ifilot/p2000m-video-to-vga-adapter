@@ -9,6 +9,7 @@
  */
 
 #include "pal_output.h"
+#include "pal_demo_screens.h"
 
 #include <stdbool.h>
 
@@ -47,6 +48,9 @@ static pal_output_frame_provider_t provide_frame;
 static const uint32_t *field_frame;
 static uint32_t field_sequence;
 static volatile pal_output_stats_t output_stats;
+enum { PAL_OPTION_TEST = 1u, PAL_OPTION_DELAY = 2u };
+static uint32_t requested_options = PAL_OPTION_DELAY;
+static uint32_t frame_options;
 
 /** Adopt an immutable decoded framebuffer for one complete field. */
 static void select_field_frame(unsigned field) {
@@ -68,14 +72,93 @@ static void select_field_frame(unsigned field) {
 /** Construct one complete 64 us PAL scanline. */
 static void build_line(uint32_t *words, unsigned line) {
     if (line == 0u) {
+        frame_options = __atomic_load_n(&requested_options, __ATOMIC_RELAXED);
         select_field_frame(0u);
     } else if (line == 312u) {
         // The second field starts halfway through this scanline. Field 1's
-        // final active line has already left the DMA FIFO before this build.
+        // final active line has already been copied into its DMA buffer.
         select_field_frame(1u);
     }
 
-    pal_waveform_build_line(words, line, field_frame);
+    // Captured video always takes priority. The saved artwork is only the
+    // fallback while the frame provider reports missing source sync.
+    const uint32_t *picture = field_frame;
+    if (picture == NULL) {
+        switch ((frame_options >> 5u) & 3u) {
+            case 1u: picture = pal_demo_radar; break;
+            case 2u: picture = pal_demo_circuit; break;
+            case 3u: picture = pal_demo_scope; break;
+            default: break; // The waveform renderer supplies the plain card.
+        }
+    }
+    pal_waveform_build_line_timed(
+        words, line, picture, (frame_options & PAL_OPTION_DELAY) != 0u,
+        (frame_options & PAL_OPTION_TEST) != 0u, (frame_options >> 2u) & 7u);
+}
+
+void pal_output_set_sync_advance(unsigned half_lines) {
+    if (half_lines > 7u) {
+        return;
+    }
+    uint32_t previous = __atomic_load_n(&requested_options, __ATOMIC_RELAXED);
+    uint32_t next;
+    do {
+        next = (previous & ~28u) | (half_lines << 2u);
+        if (half_lines >= 6u) {
+            next &= ~PAL_OPTION_DELAY;
+        }
+    } while (!__atomic_compare_exchange_n(&requested_options, &previous, next,
+                 false, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+}
+
+unsigned pal_output_sync_advance(void) {
+    return (__atomic_load_n(&requested_options, __ATOMIC_RELAXED) >> 2u) & 7u;
+}
+
+/** Demo and calibration modes are mutually exclusive and frame-latched. */
+void pal_output_set_demo(unsigned screen) {
+    if (screen > 3u) return;
+    uint32_t previous = __atomic_load_n(&requested_options, __ATOMIC_RELAXED);
+    uint32_t next;
+    do {
+        next = (previous & ~(96u | PAL_OPTION_TEST)) | (screen << 5u);
+    } while (!__atomic_compare_exchange_n(&requested_options, &previous, next,
+                 false, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+}
+
+unsigned pal_output_demo(void) {
+    return (__atomic_load_n(&requested_options, __ATOMIC_RELAXED) >> 5u) & 3u;
+}
+
+void pal_output_set_test_pattern(bool enabled) {
+    uint32_t previous = __atomic_load_n(&requested_options, __ATOMIC_RELAXED);
+    uint32_t next;
+    do {
+        next = (previous & ~(96u | PAL_OPTION_TEST)) |
+               (enabled ? PAL_OPTION_TEST : 0u);
+    } while (!__atomic_compare_exchange_n(&requested_options, &previous, next,
+                 false, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+}
+
+bool pal_output_test_pattern_enabled(void) {
+    return (__atomic_load_n(&requested_options, __ATOMIC_RELAXED) &
+            PAL_OPTION_TEST) != 0u;
+}
+
+void pal_output_set_picture_delay(bool enabled) {
+    if (enabled && pal_output_sync_advance() >= 6u) {
+        return;
+    }
+    if (enabled) {
+        __atomic_fetch_or(&requested_options, PAL_OPTION_DELAY, __ATOMIC_RELAXED);
+    } else {
+        __atomic_fetch_and(&requested_options, ~PAL_OPTION_DELAY, __ATOMIC_RELAXED);
+    }
+}
+
+bool pal_output_picture_delay_enabled(void) {
+    return (__atomic_load_n(&requested_options, __ATOMIC_RELAXED) &
+            PAL_OPTION_DELAY) != 0u;
 }
 
 /** Build the next two sequential lines into one DMA buffer. */

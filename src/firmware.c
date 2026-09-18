@@ -86,7 +86,7 @@ enum {
     /** File-format signature: ASCII "V2GA" when viewed little-endian. */
     SETTINGS_MAGIC = 0x41473256,
     /** On-flash settings structure version. */
-    SETTINGS_VERSION = 4,
+    SETTINGS_VERSION = 6,
     /** Maximum time to coordinate each multicore flash lockout phase. */
     FLASH_LOCKOUT_TIMEOUT_MS = 1000,
     /** Core-start handshake value sent through the multicore FIFO. */
@@ -185,6 +185,13 @@ enum {
     OUTPUT_FLAG_VGA_ENABLED = 1u << 0,
     /** Persisted physical PAL composite output enable bit. */
     OUTPUT_FLAG_PAL_ENABLED = 1u << 1,
+    /** Version-five timing fields share the previously unused output bits. */
+    OUTPUT_FLAG_PAL_PICTURE_DELAY = 1u << 2,
+    OUTPUT_PAL_SYNC_SHIFT = 3,
+    OUTPUT_PAL_SYNC_MASK = 7u << OUTPUT_PAL_SYNC_SHIFT,
+    /** Version-six PAL artwork selection: off, radar, circuit, scope. */
+    OUTPUT_PAL_DEMO_SHIFT = 6,
+    OUTPUT_PAL_DEMO_MASK = 3u << OUTPUT_PAL_DEMO_SHIFT,
 };
 
 /** User-selectable colors and geometry overlay for one VGA frame. */
@@ -227,7 +234,7 @@ typedef struct {
     uint8_t phosphor_noise_level;
     /** Saved manual sampling-phase trim from -4 through +4 ticks. */
     int8_t manual_phase_ticks;
-    /** Packed OUTPUT_FLAG_* values. */
+    /** Packed output enables, composite timing and (version six) artwork. */
     uint8_t output_flags;
     /** CRC-32 of every preceding byte in this structure. */
     uint32_t checksum;
@@ -555,8 +562,16 @@ static const persisted_settings_t *settings_slot_record(unsigned slot) {
  * @return true only when every structural and integrity check succeeds.
  */
 static bool settings_record_is_valid(const persisted_settings_t *record) {
+    const uint8_t allowed_output_flags = OUTPUT_FLAG_VGA_ENABLED |
+        OUTPUT_FLAG_PAL_ENABLED |
+        (record->version >= 5u
+             ? OUTPUT_FLAG_PAL_PICTURE_DELAY | OUTPUT_PAL_SYNC_MASK : 0u) |
+        (record->version == SETTINGS_VERSION ? OUTPUT_PAL_DEMO_MASK : 0u);
+    const unsigned sync_advance =
+        (record->output_flags & OUTPUT_PAL_SYNC_MASK) >> OUTPUT_PAL_SYNC_SHIFT;
     return record->magic == SETTINGS_MAGIC &&
-        record->version == SETTINGS_VERSION &&
+        (record->version == SETTINGS_VERSION || record->version == 5u ||
+         record->version == 4u) &&
         record->length == sizeof(*record) &&
         (record->foreground_rgb & 0xff000000u) == 0u &&
         (record->background_rgb & 0xff000000u) == 0u &&
@@ -568,8 +583,9 @@ static bool settings_record_is_valid(const persisted_settings_t *record) {
             P2000M_PHOSPHOR_NOISE_LEVEL_COUNT &&
         record->manual_phase_ticks >= -4 &&
         record->manual_phase_ticks <= 4 &&
-        (record->output_flags & ~(OUTPUT_FLAG_VGA_ENABLED |
-                                  OUTPUT_FLAG_PAL_ENABLED)) == 0u &&
+        (record->output_flags & ~allowed_output_flags) == 0u &&
+        !(sync_advance >= 6u &&
+          (record->output_flags & OUTPUT_FLAG_PAL_PICTURE_DELAY) != 0u) &&
         record->checksum ==
             settings_crc32(record, offsetof(persisted_settings_t, checksum));
 }
@@ -684,6 +700,8 @@ static bool load_saved_configuration(display_style_t *style,
     style->foreground_rgb = newest_record->foreground_rgb;
     style->background_rgb = newest_record->background_rgb;
     if (newest_record->version == SETTINGS_VERSION ||
+        newest_record->version == 5u ||
+        newest_record->version == 4u ||
         newest_record->version == 3u) {
         style->border_rgb = newest_record->border_rgb;
         style->border_enabled =
@@ -695,12 +713,22 @@ static bool load_saved_configuration(display_style_t *style,
              DISPLAY_FLAG_VERTICAL_STRETCH) != 0u;
         style->phosphor_noise_level = newest_record->phosphor_noise_level;
         saved_manual_phase_ticks = newest_record->manual_phase_ticks;
-        if (newest_record->version == SETTINGS_VERSION) {
+        if (newest_record->version >= 4u) {
             *vga_enabled =
                 (newest_record->output_flags & OUTPUT_FLAG_VGA_ENABLED) != 0u;
             *pal_enabled =
                 (newest_record->output_flags & OUTPUT_FLAG_PAL_ENABLED) != 0u;
         }
+        if (newest_record->version >= 5u) {
+            pal_output_set_sync_advance(
+                (newest_record->output_flags & OUTPUT_PAL_SYNC_MASK) >>
+                OUTPUT_PAL_SYNC_SHIFT);
+            pal_output_set_picture_delay(
+                (newest_record->output_flags & OUTPUT_FLAG_PAL_PICTURE_DELAY) != 0u);
+        }
+        pal_output_set_demo(newest_record->version >= 6u
+            ? (newest_record->output_flags & OUTPUT_PAL_DEMO_MASK) >>
+              OUTPUT_PAL_DEMO_SHIFT : 0u);
     } else if (newest_record->version == 2u) {
         const persisted_settings_v2_t *legacy =
             (const persisted_settings_v2_t *)newest_record;
@@ -1028,7 +1056,7 @@ static void select_frame_for_next_vga_frame(void) {
  * @brief Select and retain the newest decoded source for one PAL field.
  *
  * PAL calls this only after the preceding field's final active scanline has
- * completed. VGA and USB may independently retain the same buffer.
+ * been copied into a DMA buffer. VGA and USB may independently retain it.
  */
 static const uint32_t *select_frame_for_next_pal_field(unsigned field,
                                                        uint32_t *sequence) {
@@ -1574,11 +1602,15 @@ static void print_statistics(void) {
     printf("VID2PAL standard=625/50 sample_rate_hz=14000000 running=%s "
            "fields=%" PRIu32 " swaps=%" PRIu32 " repeats=%" PRIu32
            " blank=%" PRIu32 " underruns=%" PRIu32 " pauses=%" PRIu32
-           " displayed_sequence=%" PRIu32 " output_line=%u\n",
+           " displayed_sequence=%" PRIu32 " output_line=%u test=%s shift=%u"
+           " sync_advance_half_lines=%u demo=%u\n",
            pal.running ? "yes" : "no", pal.generated_fields,
            pal.source_frame_swaps, pal.repeated_fields, pal.blank_fields,
            pal.dma_underruns, pal.pause_count, pal.displayed_sequence,
-           (unsigned)pal.output_line);
+           (unsigned)pal.output_line,
+           pal_output_test_pattern_enabled() ? "on" : "off",
+           pal_output_picture_delay_enabled() ? 1u : 0u,
+           pal_output_sync_advance(), pal_output_demo());
 
     if (capture.last_frame_period_us == 0) {
         printf("VID2VGA capture_frames=%" PRIu32
@@ -2262,6 +2294,11 @@ static int save_current_configuration(void) {
     if (pal_output_is_enabled()) {
         output_flags |= OUTPUT_FLAG_PAL_ENABLED;
     }
+    if (pal_output_picture_delay_enabled()) {
+        output_flags |= OUTPUT_FLAG_PAL_PICTURE_DELAY;
+    }
+    output_flags |= (uint8_t)(pal_output_sync_advance() << OUTPUT_PAL_SYNC_SHIFT);
+    output_flags |= (uint8_t)(pal_output_demo() << OUTPUT_PAL_DEMO_SHIFT);
     const unsigned target_slot = saved_settings_slot < 0
                                      ? 0u
                                      : ((unsigned)saved_settings_slot ^ 1u);
@@ -2379,7 +2416,7 @@ static void print_display_settings(void) {
     printf("DISPLAY foreground=#%06" PRIx32 " background=#%06" PRIx32
            " border=%s border_color=#%06" PRIx32
            " border_style=%s scale=%s noise=%s phase_trim=%" PRId32
-           " storage=%s vga=%s pal=%s\n",
+           " storage=%s vga=%s pal=%s pal_shift=%u pal_sync=%u pal_demo=%u\n",
            style.foreground_rgb, style.background_rgb,
            style.border_enabled ? "on" : "off",
            style.border_rgb,
@@ -2389,7 +2426,9 @@ static void print_display_settings(void) {
            capture.manual_phase_ticks,
            storage_state,
            vga_output_is_enabled() ? "on" : "off",
-           pal_output_is_enabled() ? "on" : "off");
+           pal_output_is_enabled() ? "on" : "off",
+           pal_output_picture_delay_enabled() ? 1u : 0u,
+           pal_output_sync_advance(), pal_output_demo());
 }
 
 /**
@@ -2512,6 +2551,10 @@ static void print_help(void) {
            "  settings                   current runtime and storage settings\n"
            "  vga on|off|toggle          control the physical VGA output\n"
            "  pal on|off|toggle          control PAL composite output\n"
+           "  pal-demo off|radar|circuit|scope  PAL signal-loss artwork\n"
+           "  pal-test on|off            built-in composite edge/text pattern\n"
+           "  pal-shift 0|1              original or one-line-later picture\n"
+           "  pal-sync 0|1|2|3|4|5|6|7           diagnostic sync advance in half-lines\n"
            "  border [on|off|toggle]     control the visible-area rectangle\n"
            "  border-color <color>       set the independent border color\n"
            "  border-style solid|dotted  select the border pattern\n"
@@ -2635,6 +2678,55 @@ static void process_usb_command(char *command) {
     } else if (strcmp(command, "pal") == 0 ||
                strcmp(command, "composite") == 0) {
         configure_physical_output("pal", argument, false);
+    } else if (strcmp(command, "pal-demo") == 0) {
+        const char *names[] = {"off", "radar", "circuit", "scope"};
+        unsigned mode;
+        for (mode = 0u; mode < 4u; ++mode) {
+            if (strcmp(argument, names[mode]) == 0) break;
+        }
+        if (mode < 4u) {
+            configuration_dirty |= pal_output_demo() != mode;
+            pal_output_set_demo(mode);
+            printf("PAL signal-loss screen %s; use save to retain after reset\n", names[mode]);
+        } else {
+            printf("Usage: pal-demo off|radar|circuit|scope\n");
+        }
+    } else if (strcmp(command, "pal-test") == 0) {
+        if (strcmp(argument, "on") == 0 || strcmp(argument, "off") == 0) {
+            configuration_dirty |= pal_output_demo() != 0u;
+            pal_output_set_test_pattern(strcmp(argument, "on") == 0);
+            printf("PAL test pattern %s\n", argument);
+        } else {
+            printf("Usage: pal-test on|off\n");
+        }
+    } else if (strcmp(command, "pal-shift") == 0) {
+        if (strcmp(argument, "0") == 0 || strcmp(argument, "1") == 0) {
+            if (strcmp(argument, "1") == 0 && pal_output_sync_advance() >= 6u) {
+                printf("3/3.5-line sync advance requires pal-shift 0\n");
+                return;
+            }
+            const bool delay = strcmp(argument, "1") == 0;
+            configuration_dirty |= pal_output_picture_delay_enabled() != delay;
+            pal_output_set_picture_delay(delay);
+            printf("PAL picture delay %s line(s); all 288 rows retained\n",
+                   argument);
+        } else {
+            printf("Usage: pal-shift 0|1\n");
+        }
+    } else if (strcmp(command, "pal-sync") == 0) {
+        if (argument[0] >= '0' && argument[0] <= '7' && argument[1] == '\0') {
+            const unsigned advance = (unsigned)(argument[0] - '0');
+            configuration_dirty |= pal_output_sync_advance() != advance ||
+                (advance >= 6u && pal_output_picture_delay_enabled());
+            pal_output_set_sync_advance(advance);
+            if (argument[0] >= '6') {
+                printf("PAL picture shift set to 0 to preserve all 288 rows\n");
+            }
+            printf("PAL sync advance %s half-line(s); 0 restores normal PAL\n",
+                   argument);
+        } else {
+            printf("Usage: pal-sync 0|1|2|3|4|5|6|7\n");
+        }
     } else if (strcmp(command, "settings") == 0) {
         print_display_settings();
     } else if (strcmp(command, "colors") == 0) {
@@ -2731,6 +2823,9 @@ static void process_usb_command(char *command) {
             }
             const bool vga_restored = set_vga_output_enabled(true);
             const bool pal_restored = set_pal_output_enabled(true);
+            pal_output_set_sync_advance(0u);
+            pal_output_set_picture_delay(true);
+            pal_output_set_test_pattern(false);
             configuration_dirty = !(vga_restored && pal_restored);
             printf(vga_restored && pal_restored
                        ? "Saved settings erased; factory defaults restored.\n"

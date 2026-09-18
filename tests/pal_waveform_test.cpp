@@ -10,6 +10,7 @@
 #include "p2000m_capture.h"
 #include "p2000m_signal_loss.h"
 #include "pal_waveform.h"
+#include "pal_demo_screens.h"
 
 namespace {
 
@@ -139,7 +140,7 @@ int main() {
     Frame frame = {};
     frame[0] = 0x80000000u;
     frame[P2000M_CAPTURE_WIDTH / 32u - 1u] = 0x00000001u;
-    pal_waveform_build_line(line.data(), 23u, frame.data());
+    pal_waveform_build_line(line.data(), 24u, frame.data());
     if (sample(line, 190u) != PAL_LEVEL_BLACK ||
         sample(line, 191u) != PAL_LEVEL_WHITE ||
         sample(line, 192u) != PAL_LEVEL_BLACK ||
@@ -153,12 +154,12 @@ int main() {
     const unsigned lastRowWord =
         (P2000M_CAPTURE_HEIGHT - 1u) * (P2000M_CAPTURE_WIDTH / 32u);
     frame[lastRowWord] = 0x80000000u;
-    pal_waveform_build_line(line.data(), 310u, frame.data());
+    pal_waveform_build_line(line.data(), 311u, frame.data());
     if (sample(line, PAL_SOURCE_FIRST_SAMPLE) != PAL_LEVEL_WHITE) {
         std::fputs("field 1 last-row mapping is incorrect\n", stderr);
         return 1;
     }
-    pal_waveform_build_line(line.data(), 623u, frame.data());
+    pal_waveform_build_line(line.data(), 624u, frame.data());
     if (sample(line, PAL_SOURCE_FIRST_SAMPLE) != PAL_LEVEL_WHITE) {
         std::fputs("field 2 last-row mapping is incorrect\n", stderr);
         return 1;
@@ -177,6 +178,106 @@ int main() {
             std::fprintf(stderr, "packed source expansion failed at pixel %u\n",
                          x);
             return 1;
+        }
+    }
+
+    frame.fill(0xffffffffu);
+    // Check the complete waveform, including the frame wrap after the new
+    // final picture line. Picture movement must never modify a sync pulse.
+    for (unsigned advance = 0u; advance <= 7u; ++advance) {
+        for (unsigned delayed = 0u; delayed <= 1u; ++delayed) {
+            for (unsigned frameLine = 0u; frameLine < 625u; ++frameLine) {
+                pal_waveform_build_line_timed(
+                    line.data(), frameLine, frame.data(), delayed != 0u, false, advance);
+                const unsigned pictureDelay = advance >= 6u ? 0u : delayed;
+                const bool active =
+                    (frameLine >= 23u + pictureDelay && frameLine <= 310u + pictureDelay) ||
+                    (frameLine >= 336u + pictureDelay && frameLine <= 623u + pictureDelay);
+                for (unsigned x = 0u; x < 896u; ++x) {
+                    const unsigned time = frameLine * 896u + x;
+                    const unsigned fieldTime = time % 280000u;
+                    bool sync = x < 66u;
+                    if (advance >= 6u) {
+                        const unsigned relative = (time + (advance - 5u) * 448u) % 280000u;
+                        if (relative < 4480u) {
+                            sync = relative % 448u <
+                                (relative < 2240u ? 382u : 33u);
+                        }
+                    } else if (fieldTime < (15u - advance) * 448u) {
+                        const unsigned pulse = fieldTime / 448u;
+                        sync = fieldTime % 448u <
+                            (pulse >= 5u - advance && pulse < 10u - advance ? 382u : 33u);
+                    }
+                    const unsigned expected = sync ? PAL_LEVEL_SYNC :
+                        active && x >= 191u && x < 831u ? PAL_LEVEL_WHITE :
+                        PAL_LEVEL_BLACK;
+                    if (sample(line, x) != expected) {
+                        std::fprintf(stderr,
+                            "waveform mismatch: advance %u delay %u line %u sample %u\n",
+                            advance, delayed, frameLine, x);
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Every source row must appear exactly once, in order, in each field.
+    for (unsigned y = 0u; y < 288u; ++y) {
+        for (unsigned word = 0u; word < 20u; ++word) {
+            frame[y * 20u + word] = (0x963ca55au * (y + 1u)) ^ word;
+        }
+    }
+    for (unsigned delayed = 0u; delayed <= 1u; ++delayed) {
+        for (unsigned first : {23u + delayed, 336u + delayed}) {
+            for (unsigned y = 0u; y < 288u; ++y) {
+                pal_waveform_build_line_configured(
+                    line.data(), first + y, frame.data(), delayed != 0u, false);
+                for (unsigned x = 0u; x < 640u; ++x) {
+                    const bool white = (frame[y * 20u + x / 32u] &
+                                        (1u << (31u - x % 32u))) != 0u;
+                    if (sample(line, 191u + x) !=
+                        (white ? PAL_LEVEL_WHITE : PAL_LEVEL_BLACK)) {
+                        std::fputs("source row lost or resampled\n", stderr);
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // The standalone test card must work without capture and keep both edge
+    // lines and identical geometry in each field for either timing setting.
+    for (unsigned delayed = 0u; delayed <= 1u; ++delayed) {
+        for (unsigned y = 0u; y < 288u; ++y) {
+            Line second;
+            pal_waveform_build_line_configured(
+                line.data(), 23u + delayed + y, nullptr, delayed != 0u, true);
+            pal_waveform_build_line_configured(
+                second.data(), 336u + delayed + y, nullptr, delayed != 0u, true);
+            if (line != second || sample(line, 191u) != PAL_LEVEL_WHITE ||
+                sample(line, 830u) != PAL_LEVEL_WHITE ||
+                !expectRange(line, 0u, 66u, PAL_LEVEL_SYNC) ||
+                !expectRange(line, 66u, 191u, PAL_LEVEL_BLACK) ||
+                !expectRange(line, 831u, 896u, PAL_LEVEL_BLACK) ||
+                ((y == 0u || y == 287u) &&
+                 !expectRange(line, 191u, 831u, PAL_LEVEL_WHITE))) {
+                std::fputs("test card geometry is incorrect\n", stderr);
+                return 1;
+            }
+            const unsigned distance = y < 144u ? y : 287u - y;
+            const bool guide = distance == 2u || distance == 4u ||
+                               distance == 8u || distance == 12u;
+            for (unsigned x = 88u; x < 216u; ++x) {
+                const unsigned expected =
+                    distance == 0u || (guide && x >= 88u + distance * 4u)
+                        ? PAL_LEVEL_WHITE : PAL_LEVEL_BLACK;
+                if (sample(line, 191u + x) != expected ||
+                    sample(line, 191u + 639u - x) != expected) {
+                    std::fputs("edge-distance guide is incorrect\n", stderr);
+                    return 1;
+                }
+            }
         }
     }
 
@@ -203,6 +304,27 @@ int main() {
                              "%u sample %u\n",
                              frameLine, position);
                 return 1;
+            }
+        }
+    }
+    // Each authored pixel must survive packed-word expansion in both fields,
+    // including the working advanced-sync mode and standard timing.
+    for (const auto *art : {pal_demo_radar, pal_demo_circuit, pal_demo_scope}) {
+        for (unsigned mode : {0u, 7u}) {
+            for (unsigned fieldStart : {23u, 336u}) {
+                for (unsigned y = 0; y < 288u; ++y) {
+                    pal_waveform_build_line_timed(line.data(), fieldStart + y,
+                                                  art, false, false, mode);
+                    for (unsigned x = 0; x < 640u; ++x) {
+                        const unsigned bit = (art[y * 20u + x / 32u] >>
+                                              (31u - x % 32u)) & 1u;
+                        if (sample(line, PAL_SOURCE_FIRST_SAMPLE + x) !=
+                            (bit ? PAL_LEVEL_WHITE : PAL_LEVEL_BLACK)) {
+                            std::fputs("PAL artwork pixel mismatch\n", stderr);
+                            return 1;
+                        }
+                    }
+                }
             }
         }
     }
