@@ -25,6 +25,14 @@
 
 #define PAL_COLD_NOINLINE(name) __attribute__((noinline)) name
 
+uint32_t pal_waveform_clock_divider(uint32_t system_hz, unsigned raster_lines,
+                                   bool near_50_hz) {
+    const uint32_t sample_hz = near_50_hz && raster_lines >= 312u &&
+        raster_lines <= 320u ? 50u * raster_lines * PAL_SAMPLES_PER_LINE :
+        PAL_SAMPLE_RATE_HZ;
+    return (uint32_t)(((uint64_t)system_hz * 256u + sample_hz / 2u) / sample_hz);
+}
+
 _Static_assert(PAL_PICTURE_END - PAL_PICTURE_START == 728,
                "PAL picture interval must retain the proven width");
 _Static_assert(PAL_SOURCE_FIRST_SAMPLE + P2000M_CAPTURE_WIDTH == 831,
@@ -275,6 +283,16 @@ static void PAL_COLD_NOINLINE(draw_test_line)(uint32_t *words,
         fill_sample_range(words, right - 16u - width, right - 16u,
                           PAL_LEVEL_WHITE);
     }
+    // A solid white panel exposes brightness modulation independently of
+    // sampled source pixels. Beside it, fixed two-pixel stripes expose edge
+    // shimmer. Keep the border/rulers and all top/bottom calibration guides.
+    if (source_y >= 72u && source_y < 216u) {
+        fill_sample_range(words, left + 128u, left + 448u, PAL_LEVEL_WHITE);
+        for (unsigned x = 480u; x < 544u; x += 4u) {
+            fill_sample_range(words, left + x, left + x + 2u, PAL_LEVEL_WHITE);
+        }
+        return;
+    }
     const unsigned row = source_y / 12u;
     char label[] = "ROW 00   HHHHH   XXXXX   00000";
     label[4] = (char)('0' + row / 10u);
@@ -282,10 +300,12 @@ static void PAL_COLD_NOINLINE(draw_test_line)(uint32_t *words,
     draw_signal_lost_text(words, source_y, label, row * 12u + 2u, 1u);
 }
 
-void PAL_TIME_CRITICAL(pal_waveform_build_line_timed)(
+void PAL_TIME_CRITICAL(pal_waveform_build_line_layout)(
     uint32_t words[PAL_WORDS_PER_LINE], unsigned line,
     const uint32_t *decoded_frame, bool delay_picture, bool test_pattern,
-    unsigned sync_advance) {
+    unsigned sync_advance, bool interlaced, unsigned extra_top_lines) {
+    if (interlaced || extra_top_lines > 8u) extra_top_lines = 0u;
+    const unsigned raster_lines = PAL_PROGRESSIVE_LINES_PER_RASTER + extra_top_lines;
     if (sync_advance > 7u) {
         sync_advance = 0u;
     }
@@ -299,21 +319,30 @@ void PAL_TIME_CRITICAL(pal_waveform_build_line_timed)(
     const int early = sync_advance > 5u
         ? (int)(sync_advance - 5u) * PAL_HALF_LINE_SAMPLES : 0;
     add_field_sync(words, line, -early, sync_advance);
-    add_field_sync(words, line, PAL_FIELD_SAMPLES - early, sync_advance);
+    const unsigned field_samples = interlaced ? PAL_FIELD_SAMPLES :
+        raster_lines * PAL_SAMPLES_PER_LINE;
+    const unsigned frame_samples = field_samples * 2u;
+    add_field_sync(words, line, (int)field_samples - early, sync_advance);
     if (early != 0) {
-        add_field_sync(words, line, PAL_FRAME_SAMPLES - early, sync_advance);
+        add_field_sync(words, line, (int)frame_samples - early, sync_advance);
         // The delayed final picture row would overlap this wrapped sync.
         delay_picture = false;
     }
 
+    const unsigned first = PAL_FIELD1_FIRST_LINE + extra_top_lines -
+        (delay_picture ? 0u : 1u);
+    const unsigned last = first + P2000M_CAPTURE_HEIGHT - 1u;
+    const unsigned second_first = interlaced ? PAL_FIELD2_FIRST_LINE :
+        PAL_FIELD1_FIRST_LINE + extra_top_lines + raster_lines;
+    const unsigned second_last = interlaced ? PAL_FIELD2_LAST_LINE :
+        PAL_FIELD1_LAST_LINE + extra_top_lines + raster_lines;
     const unsigned advance = delay_picture ? 0u : 1u;
     unsigned source_y;
-    if (line >= PAL_FIELD1_FIRST_LINE - advance &&
-        line <= PAL_FIELD1_LAST_LINE - advance) {
-        source_y = line - (PAL_FIELD1_FIRST_LINE - advance);
-    } else if (line >= PAL_FIELD2_FIRST_LINE - advance &&
-               line <= PAL_FIELD2_LAST_LINE - advance) {
-        source_y = line - (PAL_FIELD2_FIRST_LINE - advance);
+    if (line >= first && line <= last) {
+        source_y = line - first;
+    } else if (line >= second_first - advance &&
+               line <= second_last - advance) {
+        source_y = line - (second_first - advance);
     } else {
         return;
     }
@@ -322,6 +351,22 @@ void PAL_TIME_CRITICAL(pal_waveform_build_line_timed)(
     } else {
         draw_source_line(words, decoded_frame, source_y);
     }
+}
+
+void PAL_TIME_CRITICAL(pal_waveform_build_line_raster)(
+    uint32_t words[PAL_WORDS_PER_LINE], unsigned line,
+    const uint32_t *decoded_frame, bool delay_picture, bool test_pattern,
+    unsigned sync_advance, bool interlaced) {
+    pal_waveform_build_line_layout(words, line, decoded_frame, delay_picture,
+                                   test_pattern, sync_advance, interlaced, 0u);
+}
+
+void PAL_TIME_CRITICAL(pal_waveform_build_line_timed)(
+    uint32_t words[PAL_WORDS_PER_LINE], unsigned line,
+    const uint32_t *decoded_frame, bool delay_picture, bool test_pattern,
+    unsigned sync_advance) {
+    pal_waveform_build_line_raster(words, line, decoded_frame, delay_picture,
+                                   test_pattern, sync_advance, true);
 }
 
 void PAL_TIME_CRITICAL(pal_waveform_build_line_configured)(

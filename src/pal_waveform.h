@@ -14,6 +14,9 @@ enum {
     PAL_SAMPLES_PER_LINE = 896,
     PAL_HALF_LINE_SAMPLES = 448,
     PAL_LINES_PER_FRAME = 625,
+    /** Diagnostic: two identical-phase 312-line rasters, about 50.080 Hz. */
+    PAL_PROGRESSIVE_LINES_PER_RASTER = 312,
+    PAL_PROGRESSIVE_LINES_PER_PAIR = 624,
     PAL_FRAME_SAMPLES = PAL_SAMPLES_PER_LINE * PAL_LINES_PER_FRAME,
     PAL_FIELD_SAMPLES = PAL_FRAME_SAMPLES / 2,
     PAL_SAMPLES_PER_WORD = 16,
@@ -68,6 +71,22 @@ void pal_waveform_build_line_timed(
     uint32_t words[PAL_WORDS_PER_LINE], unsigned line,
     const uint32_t *decoded_frame, bool delay_picture, bool test_pattern,
     unsigned sync_advance);
+
+/** Experimental 312-line progressive output; interlaced=true retains 625/50. */
+void pal_waveform_build_line_raster(
+    uint32_t words[PAL_WORDS_PER_LINE], unsigned line,
+    const uint32_t *decoded_frame, bool delay_picture, bool test_pattern,
+    unsigned sync_advance, bool interlaced);
+
+/** Progressive-only extra top blanking (0..8); extends each raster equally. */
+void pal_waveform_build_line_layout(
+    uint32_t words[PAL_WORDS_PER_LINE], unsigned line,
+    const uint32_t *decoded_frame, bool delay_picture, bool test_pattern,
+    unsigned sync_advance, bool interlaced, unsigned extra_top_lines);
+
+/** Rounded 16.8 PIO divider: native sample rate or near-50 Hz progressive. */
+uint32_t pal_waveform_clock_divider(uint32_t system_hz, unsigned raster_lines,
+                                   bool near_50_hz);
 
 #ifdef __cplusplus
 }

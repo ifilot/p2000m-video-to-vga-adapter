@@ -34,7 +34,12 @@ enum {
     VSYNC_PIN = 18,
 
     /** Raw buffers used to decouple DMA capture from software consumers. */
+#if defined(P2000M_PAL_STATIC_RASTER_DIAGNOSTIC)
+    // Free SRAM for the immutable test raster in this dedicated build only.
+    CAPTURE_BUFFER_COUNT = 2,
+#else
     CAPTURE_BUFFER_COUNT = 3,
+#endif
     /** Initial frame-line count plus one sample-group count per visible line. */
     TX_COMMAND_COUNT = 1 + P2000M_CAPTURE_HEIGHT,
     /** PIO y-loop initializer for 288 lines. */
@@ -66,7 +71,7 @@ enum {
     TUNING_WINDOW_RADIUS_TICKS = 1,
 };
 
-/** Ownership states for one entry in the triple raw-frame buffer. */
+/** Ownership states for one entry in the raw-frame buffer pool. */
 typedef enum {
     /** Available as the next DMA destination. */
     BUFFER_FREE,
@@ -101,7 +106,7 @@ static int capture_tx_dma;
 /** Lock protecting raw-buffer ownership and capture statistics. */
 static spin_lock_t *buffer_lock;
 
-/** Triple-buffered packed oversampling data. */
+/** Packed oversampling data; the fixed-raster diagnostic uses two buffers. */
 static uint32_t capture_buffers[CAPTURE_BUFFER_COUNT][P2000M_CAPTURE_WORDS_PER_FRAME];
 /** DMA-fed PIO loop counts: frame line count followed by line group counts. */
 static uint32_t tx_commands[TX_COMMAND_COUNT];

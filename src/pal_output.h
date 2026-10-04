@@ -16,10 +16,17 @@ typedef struct {
     uint32_t repeated_fields;
     uint32_t blank_fields;
     uint32_t dma_underruns;
+    /** Service intervals with a hardware TX stall; multiple stalls may coalesce. */
+    uint32_t pio_stall_observations;
     uint32_t pause_count;
     uint32_t displayed_sequence;
     uint16_t output_line;
+    uint16_t raster_lines;
+    uint32_t clock_divider_q8;
     bool running;
+    bool interlaced;
+    /** Dedicated diagnostic build: DMA reads a precomputed immutable raster. */
+    bool static_raster;
 } pal_output_stats_t;
 
 /**
@@ -59,4 +66,15 @@ void pal_output_set_picture_delay(bool enabled);
 bool pal_output_picture_delay_enabled(void);
 void pal_output_set_sync_advance(unsigned half_lines);
 unsigned pal_output_sync_advance(void);
+/** Runtime diagnostic; firmware applies the progressive boot profile. */
+void pal_output_set_interlaced(bool enabled);
+bool pal_output_interlaced(void);
+/** Temporary extra progressive blanking; ignored by interlaced output. */
+void pal_output_set_extra_top_lines(unsigned lines);
+unsigned pal_output_extra_top_lines(void);
+/** Temporary progressive clock adjustment; interlace retains native timing. */
+void pal_output_set_rate_50(bool enabled);
+/** Temporary trial: retain one immutable source frame for both scans/fields. */
+void pal_output_set_pair_hold(bool enabled);
+bool pal_output_pair_hold(void);
 #endif

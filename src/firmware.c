@@ -17,6 +17,7 @@
 
 #include "hardware/clocks.h"
 #include "hardware/flash.h"
+#include "hardware/pio.h"
 #include "hardware/sync.h"
 #include "hardware/vreg.h"
 #include "pal_output.h"
@@ -754,6 +755,22 @@ static bool load_saved_configuration(display_style_t *style,
     saved_settings_slot = newest_slot;
     saved_settings_sequence = newest_record->sequence;
     return true;
+}
+
+/** Apply progressive timing defaults while retaining the fallback artwork. */
+static void apply_pal_startup_profile(void) {
+    pal_output_set_sync_advance(0u);
+    pal_output_set_picture_delay(true);
+    pal_output_set_extra_top_lines(6u);
+    pal_output_set_rate_50(true);
+    pal_output_set_pair_hold(true);
+    pal_output_set_interlaced(false);
+#if defined(P2000M_PAL_STATIC_RASTER_DIAGNOSTIC)
+    pal_output_set_test_pattern(true);
+#else
+    // Selecting the existing fallback disables the test without replacing it.
+    pal_output_set_demo(pal_output_demo());
+#endif
 }
 
 /**
@@ -1599,18 +1616,32 @@ static void print_statistics(void) {
            screen_last_encode_us, screen_maximum_encode_us,
            screen_last_tx_us, screen_maximum_tx_us);
 
-    printf("VID2PAL standard=625/50 sample_rate_hz=14000000 running=%s "
+    const uint32_t sample_hz = pal.clock_divider_q8 ?
+        (uint32_t)((uint64_t)clock_get_hz(clk_sys) * 256u / pal.clock_divider_q8) : 0u;
+    const uint32_t pal_rate_millihz = pal.interlaced ? 50000u :
+        (pal.raster_lines ? (uint32_t)((uint64_t)sample_hz * 1000u /
+            (pal.raster_lines * 896u)) : 0u);
+    printf("VID2PAL standard=%s sample_rate_hz=%" PRIu32 " running=%s "
            "fields=%" PRIu32 " swaps=%" PRIu32 " repeats=%" PRIu32
-           " blank=%" PRIu32 " underruns=%" PRIu32 " pauses=%" PRIu32
+           " blank=%" PRIu32 " underruns=%" PRIu32
+           " pio_stall_observations=%" PRIu32 " pauses=%" PRIu32
            " displayed_sequence=%" PRIu32 " output_line=%u test=%s shift=%u"
-           " sync_advance_half_lines=%u demo=%u\n",
+           " sync_advance_half_lines=%u demo=%u extra_top_lines=%u"
+           " raster_lines=%u raster_rate_millihz=%" PRIu32
+           " pair_hold=%s static_raster=%s\n",
+           pal.interlaced ? "625/50" : "progressive-experimental",
+           sample_hz,
            pal.running ? "yes" : "no", pal.generated_fields,
            pal.source_frame_swaps, pal.repeated_fields, pal.blank_fields,
-           pal.dma_underruns, pal.pause_count, pal.displayed_sequence,
+           pal.dma_underruns, pal.pio_stall_observations, pal.pause_count,
+           pal.displayed_sequence,
            (unsigned)pal.output_line,
            pal_output_test_pattern_enabled() ? "on" : "off",
            pal_output_picture_delay_enabled() ? 1u : 0u,
-           pal_output_sync_advance(), pal_output_demo());
+           pal_output_sync_advance(), pal_output_demo(),
+           pal_output_extra_top_lines(), (unsigned)pal.raster_lines,
+           pal_rate_millihz, pal_output_pair_hold() ? "on" : "off",
+           pal.static_raster ? "on" : "off");
 
     if (capture.last_frame_period_us == 0) {
         printf("VID2VGA capture_frames=%" PRIu32
@@ -2212,6 +2243,19 @@ static bool pal_output_is_enabled(void) {
     return !__atomic_load_n(&pal_pause_requested, __ATOMIC_ACQUIRE);
 }
 
+/** Work around repeated PIO claims in pinned pico-extras SDK 2.3.0.
+ * Its DPI timing toggle claims PIO0 SM0 and SM3 on every state change, including
+ * disable. Only scanvideo owns PIO0, and no resources are allocated at runtime.
+ * Release its software claims immediately before it reclaims the same SMs.
+ */
+static void set_vga_timing_enabled(bool enabled) {
+    _Static_assert(PICO_SCANVIDEO_PLANE_COUNT == 1,
+                   "VGA toggle workaround assumes one scanvideo plane");
+    if (pio_sm_is_claimed(pio0, 0u)) pio_sm_unclaim(pio0, 0u);
+    if (pio_sm_is_claimed(pio0, 3u)) pio_sm_unclaim(pio0, 3u);
+    scanvideo_timing_enable(enabled);
+}
+
 /** Enable or disable VGA timing while safely coordinating its producer. */
 static bool set_vga_output_enabled(bool enabled) {
     if (vga_output_is_enabled() == enabled) {
@@ -2222,12 +2266,12 @@ static bool set_vga_output_enabled(bool enabled) {
         if (!request_vga_pause(false)) {
             return false;
         }
-        scanvideo_timing_enable(true);
+        set_vga_timing_enabled(true);
     } else {
         if (!request_vga_pause(true)) {
             return false;
         }
-        scanvideo_timing_enable(false);
+        set_vga_timing_enabled(false);
     }
     configuration_dirty = true;
     return true;
@@ -2555,6 +2599,10 @@ static void print_help(void) {
            "  pal-test on|off            built-in composite edge/text pattern\n"
            "  pal-shift 0|1              original or one-line-later picture\n"
            "  pal-sync 0|1|2|3|4|5|6|7           diagnostic sync advance in half-lines\n"
+           "  pal-interlace on|off      temporary interlaced/progressive trial\n"
+           "  pal-top 0..8              extra progressive top blanking lines\n"
+           "  pal-rate native|50        temporary progressive refresh trial\n"
+           "  pal-pair on|off           hold one source image across both fields\n"
            "  border [on|off|toggle]     control the visible-area rectangle\n"
            "  border-color <color>       set the independent border color\n"
            "  border-style solid|dotted  select the border pattern\n"
@@ -2713,6 +2761,38 @@ static void process_usb_command(char *command) {
         } else {
             printf("Usage: pal-shift 0|1\n");
         }
+    } else if (strcmp(command, "pal-pair") == 0) {
+        if (strcmp(argument, "on") == 0 || strcmp(argument, "off") == 0) {
+            pal_output_set_pair_hold(strcmp(argument, "on") == 0);
+            printf("PAL source frame pair hold %s; temporary until reboot\n", argument);
+        } else {
+            printf("Usage: pal-pair on|off\n");
+        }
+    } else if (strcmp(command, "pal-rate") == 0) {
+        if (strcmp(argument, "native") == 0 || strcmp(argument, "50") == 0) {
+            pal_output_set_rate_50(strcmp(argument, "50") == 0);
+            printf("PAL progressive clock %s; temporary until reboot\n",
+                   strcmp(argument, "50") == 0 ? "near 50 Hz" : "native 14 MHz");
+        } else {
+            printf("Usage: pal-rate native|50\n");
+        }
+    } else if (strcmp(command, "pal-top") == 0) {
+        if (argument[0] >= '0' && argument[0] <= '8' && argument[1] == '\0') {
+            pal_output_set_extra_top_lines((unsigned)(argument[0] - '0'));
+            printf("PAL extra progressive top blanking %s lines; temporary until reboot\n",
+                   argument);
+        } else {
+            printf("Usage: pal-top 0..8\n");
+        }
+    } else if (strcmp(command, "pal-interlace") == 0) {
+        if (strcmp(argument, "on") == 0 || strcmp(argument, "off") == 0) {
+            const bool enabled = strcmp(argument, "on") == 0;
+            pal_output_set_interlaced(enabled);
+            printf("PAL raster %s; temporary until reboot; status reports rate\n",
+                   enabled ? "625/50 interlaced" : "progressive");
+        } else {
+            printf("Usage: pal-interlace on|off\n");
+        }
     } else if (strcmp(command, "pal-sync") == 0) {
         if (argument[0] >= '0' && argument[0] <= '7' && argument[1] == '\0') {
             const unsigned advance = (unsigned)(argument[0] - '0');
@@ -2823,9 +2903,8 @@ static void process_usb_command(char *command) {
             }
             const bool vga_restored = set_vga_output_enabled(true);
             const bool pal_restored = set_pal_output_enabled(true);
-            pal_output_set_sync_advance(0u);
-            pal_output_set_picture_delay(true);
-            pal_output_set_test_pattern(false);
+            apply_pal_startup_profile();
+            pal_output_set_demo(1u);
             configuration_dirty = !(vga_restored && pal_restored);
             printf(vga_restored && pal_restored
                        ? "Saved settings erased; factory defaults restored.\n"
@@ -2998,6 +3077,9 @@ int main(void) {
     bool initial_pal_enabled = true;
     restored_saved_settings = load_saved_configuration(
         &initial_style, &initial_vga_enabled, &initial_pal_enabled);
+    // Apply the selected PAL timing after loading legacy settings, retaining
+    // saved artwork, display style and output enable preferences.
+    apply_pal_startup_profile();
     __atomic_store_n(&vga_pause_requested, !initial_vga_enabled,
                      __ATOMIC_RELEASE);
     __atomic_store_n(&pal_pause_requested, !initial_pal_enabled,

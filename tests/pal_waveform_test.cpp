@@ -37,6 +37,19 @@ bool expectRange(const Line &line, unsigned first, unsigned end,
 }  // namespace
 
 int main() {
+    if (pal_waveform_clock_divider(252000000u, 318u, false) != 18u * 256u ||
+        pal_waveform_clock_divider(252000000u, 318u, true) != 4528u) {
+        std::fputs("unexpected native or 318-line clock divider\n", stderr);
+        return 1;
+    }
+    for (unsigned lines = 312u; lines <= 320u; ++lines) {
+        const uint32_t divider = pal_waveform_clock_divider(252000000u, lines, true);
+        const double rate = 252000000.0 * 256.0 / divider / (lines * 896.0);
+        if (rate < 49.995 || rate > 50.005) {
+            std::fprintf(stderr, "near-50 Hz rate out of range: %.9f\n", rate);
+            return 1;
+        }
+    }
     Line line = {};
     pal_waveform_build_line(line.data(), 8u, nullptr);
     if (!expectRange(line, 0u, 66u, PAL_LEVEL_SYNC) ||
@@ -266,6 +279,23 @@ int main() {
                 return 1;
             }
             const unsigned distance = y < 144u ? y : 287u - y;
+            if (y >= 72u && y < 216u) {
+                if (!expectRange(line, 191u + 128u, 191u + 448u, PAL_LEVEL_WHITE) ||
+                    sample(line, 191u + 127u) != PAL_LEVEL_BLACK ||
+                    sample(line, 191u + 448u) != PAL_LEVEL_BLACK) {
+                    std::fputs("static brightness panel is not uniform\n", stderr);
+                    return 1;
+                }
+                for (unsigned x = 480u; x < 544u; ++x) {
+                    const unsigned expected = (x % 4u) < 2u ?
+                        PAL_LEVEL_WHITE : PAL_LEVEL_BLACK;
+                    if (sample(line, 191u + x) != expected) {
+                        std::fputs("static shimmer stripes are incorrect\n", stderr);
+                        return 1;
+                    }
+                }
+                continue;
+            }
             const bool guide = distance == 2u || distance == 4u ||
                                distance == 8u || distance == 12u;
             for (unsigned x = 88u; x < 216u; ++x) {
@@ -326,6 +356,98 @@ int main() {
                     }
                 }
             }
+        }
+    }
+    // Progressive diagnostics must repeat the exact same raster phase, retain
+    // every source pixel, and preserve the complete standard sync sequence.
+    // Exercise all legacy sync/position options as well, including wrapped sync.
+    for (unsigned y = 0u; y < 288u; ++y) {
+        for (unsigned word = 0u; word < 20u; ++word) {
+            frame[y * 20u + word] = (0x963ca55au * (y + 1u)) ^ word;
+        }
+    }
+    for (unsigned extra : {0u, 1u, 3u, 6u, 8u}) {
+      const unsigned rasterLines = 312u + extra;
+      for (unsigned mode = 0u; mode < 8u; ++mode) {
+        for (unsigned delayed = 0u; delayed < 2u; ++delayed) {
+            const unsigned first = 23u + extra + (mode >= 6u ? 0u : delayed);
+            unsigned rows = 0u;
+            for (unsigned y = 0u; y < rasterLines; ++y) {
+                Line second;
+                pal_waveform_build_line_layout(line.data(), y, frame.data(),
+                                               delayed != 0u, false, mode, false, extra);
+                pal_waveform_build_line_layout(second.data(), y + rasterLines,
+                                               frame.data(), delayed != 0u,
+                                               false, mode, false, extra);
+                if (line != second) {
+                    std::fputs("progressive raster phase differs between scans\n", stderr);
+                    return 1;
+                }
+                const bool active = y >= first && y < first + 288u;
+                if (active) ++rows;
+                for (unsigned x = 0u; x < 896u; ++x) {
+                    const unsigned time = y * 896u + x;
+                    bool sync = x < 66u;
+                    if (mode >= 6u) {
+                        const unsigned relative =
+                            (time + (mode - 5u) * 448u) % (rasterLines * 896u);
+                        if (relative < 4480u) {
+                            sync = relative % 448u <
+                                (relative < 2240u ? 382u : 33u);
+                        }
+                    } else if (time < (15u - mode) * 448u) {
+                        const unsigned pulse = time / 448u;
+                        sync = time % 448u <
+                            (pulse >= 5u - mode && pulse < 10u - mode ? 382u : 33u);
+                    }
+                    bool white = false;
+                    if (active && x >= 191u && x < 831u) {
+                        const unsigned source_x = x - 191u;
+                        white = (frame[(y - first) * 20u + source_x / 32u] &
+                                 (1u << (31u - source_x % 32u))) != 0u;
+                    }
+                    const unsigned expected = sync ? PAL_LEVEL_SYNC :
+                        white ? PAL_LEVEL_WHITE : PAL_LEVEL_BLACK;
+                    if (sample(line, x) != expected) {
+                        std::fprintf(stderr,
+                            "progressive mismatch: extra %u mode %u delay %u line %u sample %u\n",
+                            extra, mode, delayed, y, x);
+                        return 1;
+                    }
+                }
+            }
+            if (rows != 288u) {
+                std::fputs("progressive source row count differs from 288\n", stderr);
+                return 1;
+            }
+        }
+      }
+    }
+    // The immutable DMA diagnostic repeats only the first 318-line test raster.
+    // Verify that doing so reproduces every word of the normal second scan,
+    // including its sync and the white-panel artwork, without reading a source.
+    for (unsigned y = 0u; y < 318u; ++y) {
+        Line second;
+        pal_waveform_build_line_layout(line.data(), y, nullptr,
+                                      true, true, 0u, false, 6u);
+        pal_waveform_build_line_layout(second.data(), y + 318u, nullptr,
+                                      true, true, 0u, false, 6u);
+        if (line != second) {
+            std::fputs("static test raster differs from normal second scan\n", stderr);
+            return 1;
+        }
+    }
+    // Extra blanking is strictly a progressive diagnostic, never an alteration
+    // of the standard interlaced waveform.
+    for (unsigned y = 0u; y < 625u; ++y) {
+        Line reference;
+        pal_waveform_build_line_raster(reference.data(), y, frame.data(),
+                                      true, false, 0u, true);
+        pal_waveform_build_line_layout(line.data(), y, frame.data(),
+                                      true, false, 0u, true, 8u);
+        if (line != reference) {
+            std::fputs("progressive blanking changed interlaced output\n", stderr);
+            return 1;
         }
     }
     return 0;

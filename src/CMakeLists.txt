@@ -3,6 +3,9 @@
 
 set(FIRMWARE_TARGET p2000m_vid2vga_firmware)
 
+option(P2000M_PAL_STATIC_RASTER_DIAGNOSTIC
+    "Diagnostic: immutable PAL test raster, with two raw capture buffers" OFF)
+
 add_executable(${FIRMWARE_TARGET}
     firmware.c
     pal_output.c
@@ -14,6 +17,11 @@ add_executable(${FIRMWARE_TARGET}
 target_include_directories(${FIRMWARE_TARGET} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
 )
+
+if(P2000M_PAL_STATIC_RASTER_DIAGNOSTIC)
+    target_compile_definitions(${FIRMWARE_TARGET} PRIVATE
+        P2000M_PAL_STATIC_RASTER_DIAGNOSTIC=1)
+endif()
 
 set_target_properties(${FIRMWARE_TARGET} PROPERTIES
     OUTPUT_NAME "p2000m-vid2vga-firmware"

@@ -15,8 +15,16 @@ and PAL-compatible monochrome 625/50 composite video.
 
 The adapter captures the conditioned P2000M signals on GPIO16-18,
 recovers the source dot grid in software, and presents the same tear-free
-640 x 288 source image on a 640 x 480, 60 Hz VGA raster and a true-interlaced
-625-line, 50-field/s composite raster. VGA and composite are active together.
+640 x 288 source image on a 640 x 480, 60 Hz VGA raster. Composite supports
+true-interlaced 625-line, 50-field/s output. The current boot default is the
+progressive timing profile: live video, 318-line output at approximately
+50.003 Hz, normal sync, picture shift 1,
+six extra top blanking lines, pair hold and slow GPIO slew. VGA and composite
+start enabled unless saved output preferences select otherwise. Timing is
+applied after loading saved settings; saved colours and fallback artwork
+remain in use, with radar as the factory fallback. Test output is disabled
+at boot, and normal capture uses three raw buffers. Existing residual
+waves/streaks remain under investigation.
 
 By default, the 288 source lines are displayed one-to-one between 96-line top
 and bottom margins. An optional fit mode expands them to all 480 VGA lines using
@@ -295,7 +303,10 @@ selects the later position. The sync waveform is identical in both settings.
 
 For a monitor test without a P2000M connected, enter `pal-test on`. The built-in
 composite pattern has a one-pixel outline, alternating white/black scanline
-rulers at both sides, and 24 numbered text rows (`ROW 00` through `ROW 23`).
+rulers at both sides, and numbered text rows near the top and bottom
+(`ROW 00` through `ROW 05`, and `ROW 18` through `ROW 23`). The middle contains
+a uniform 320 x 144 white panel and fixed two-pixel white/black stripes beside
+it to distinguish brightness modulation from pixel-edge shimmer.
 Four inset horizontal guides sit 2, 4, 8 and 12 source scanlines from both the
 top and bottom borders. Their lengths decrease moving inward; compare which
 guides remain visible to estimate how many edge scanlines the monitor hides.
@@ -304,12 +315,70 @@ bottom of row 23 while switching `pal-shift 0` / `pal-shift 1`. Keep the monitor
 controls unchanged during the comparison. `pal-test off` restores captured
 video or the signal-loss card. Timing changes take effect at a frame boundary.
 `save` persists `pal-shift` and `pal-sync` alongside the other settings; without
-a saved timing record the defaults are shift 1 and sync 0. The test pattern is
-temporary and always starts off after reboot.
-`status` reports `test`, `shift`, and DMA `underruns`. The capture-related PAL
+a saved timing record the defaults are shift 1 and sync 0. The current boot
+profile overrides saved PAL timing and disables the test pattern after reboot.
+`status` reports `test`, `shift`, DMA `underruns`, and
+`pio_stall_observations`. The latter counts service intervals in which the
+hardware reports an empty transmit FIFO; multiple stalls can coalesce into one
+observation. A short FIFO stall stretches output timing even if the DMA
+underrun counter remains zero. PAL DMA uses high-priority scheduling and primes
+the FIFO before enabling scanout. The capture-related PAL
 counters still describe the input frame provider while the test pattern runs.
 Opening the USB serial port at 1200 baud enters the Pico BOOTSEL bootloader for
 firmware uploads; use 115200 baud for normal console access.
+
+The optional CMake flag `P2000M_PAL_STATIC_RASTER_DIAGNOSTIC=ON` builds a
+diagnostic that precomputes the complete progressive white-panel raster in
+SRAM when `pal-test on`, `pal-interlace off` and `pal-top 6` are selected.
+Both PAL DMA channels read that same immutable raster; CPU service only
+rearms a completed channel once per scan, rather than preparing each pair of
+lines. `status` confirms `static_raster=on`. Configuration changes restart
+the stream before rebuilding the raster. Other layouts use normal scanline
+preparation. This build uses two raw input-capture buffers instead of three
+to free SRAM; compare with the source input disconnected. The option defaults
+off for three capture buffers and live composite video at boot. Enabling it
+also enables the fixed test pattern at boot for dedicated diagnostic builds.
+Both builds retain the progressive timing profile. PAL source-frame
+counters do not advance while the immutable test raster is active.
+
+`pal-interlace off` selects a temporary 312-line progressive diagnostic raster
+at approximately 50.080 Hz. Each scan starts at the same horizontal phase to
+test whether vertical bobbing comes from displaying the same 288 source rows
+in alternating interlaced fields. All source rows and the 14 MHz sample clock
+are retained. This is experimental monochrome composite timing, rather than
+standard 625/50 interlace. `pal-interlace on` restores 625/50 output; reboot
+restores the progressive boot profile, and `save` does not persist this diagnostic. Sync and
+picture-position controls continue to apply. `status` reports the active raster
+as `625/50` or `progressive-experimental`, with its rate in millihertz.
+Changes occur at a raster-pair boundary.
+
+`pal-top 0..8` temporarily adds that many blank lines before the progressive
+picture and extends each scan by the same number of lines. This gives the
+monitor more time between vertical sync and the picture without discarding
+source rows. For example, `pal-top 3` uses 315 lines at approximately 49.603 Hz;
+the horizontal line rate remains 15.625 kHz. `pal-top 0` restores the 312-line
+trial. This option is ignored in interlaced mode, is not saved, and resets to
+zero on reboot.
+
+`pal-rate 50` temporarily adjusts the progressive PIO sample clock to bring
+the selected raster close to 50 Hz while retaining all picture and blanking
+lines. With `pal-top 6`, the 318-line trial calculates to about 50.003 Hz,
+14.247 MHz samples and a 15.901 kHz horizontal rate. Pulse widths and picture
+width in microseconds scale with this clock. VGA and capture clocks are
+unaffected. The result is experimental timing, not standard 625/50.
+`pal-rate native` restores the 14 MHz sample clock. A clock change restarts the
+PAL stream once, and the option resets on reboot rather than being saved.
+`status` reports the calculated active sample and raster rates; these are not
+measurements of the physical oscillator. The PIO divider has
+[1/256 fractional resolution](https://www.raspberrypi.com/documentation/pico-sdk/hardware.html).
+
+`pal-pair on` temporarily selects one captured image at the first field/scan
+and retains it for the second, testing temporal differences between fields.
+It works with either raster mode and reduces image updates to approximately
+25 per second while scanout remains approximately 50 per second. Geometry and
+sync are unchanged. `pal-pair off` restores independent source selection for
+each field/scan. This diagnostic is not saved; the current boot profile
+enables pairing after reboot.
 
 `pal-sync 0|1|2|3|4|5|6|7` selects a diagnostic advance of the broad vertical-sync
 pulses by 0, 0.5, 1, 1.5, 2, 2.5, 3 or 3.5 lines. Modes 1 through 5 shorten the pre-equalising
